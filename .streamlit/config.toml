@@ -1,0 +1,10 @@
+# Quadrant Strategies theme. Colors pulled from the Navigator product's own
+# rendering CSS (the closest thing to a consistent Quadrant palette found on
+# this machine — there's no formal brand guide, so treat these as a
+# best-effort match and swap them out if the firm's actual brand kit differs.
+[theme]
+primaryColor = "#a91e2a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f3f5"
+textColor = "#1a1a1a"
+font = "sans serif"

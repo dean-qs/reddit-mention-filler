@@ -8,6 +8,29 @@ ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 EXCEL_CELL_LIMIT = 32767
 URL_RE = re.compile(r'https?://[^\s\)\]"\']+')
 
+# The Bulk Mentions export's own placeholder text for withheld Reddit content —
+# used to tell "not filled yet" apart from "filled, but legitimately empty".
+LICENSING_PLACEHOLDER = "licensing restrictions"
+
+_SUBREDDIT_RE = re.compile(r'reddit\.com/r/([A-Za-z0-9_]+)/', re.I)
+
+
+def subreddit_from_url(url):
+    m = _SUBREDDIT_RE.search(str(url or ""))
+    return m.group(1) if m else ""
+
+
+def looks_unfilled(text):
+    """True if `text` is empty or still the export's withheld-content placeholder."""
+    t = (text or "").strip()
+    return not t or LICENSING_PLACEHOLDER in t.lower()
+
+
+def rough_token_estimate(text):
+    """Cheap word-count-based approximation — good enough for a pre-run estimate,
+    not for billing (real cost is computed from actual API usage after running)."""
+    return max(1, int(len((text or "").split()) * 1.3))
+
 
 def norm(url):
     return str(url).strip().split("?")[0].rstrip("/")

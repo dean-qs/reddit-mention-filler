@@ -8,8 +8,12 @@ the next one's input (new columns are always appended, never inserted, so
 the original 'Query Id' header and required columns stay put between steps).
 No changes to app.py are needed.
 """
+from .geolocation import GeolocationModule
 from .mention_filler import MentionFillerModule
+from .sentiment import SentimentModule
 
 MODULES = [
     MentionFillerModule(),
+    SentimentModule(),
+    GeolocationModule(),
 ]

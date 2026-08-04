@@ -183,6 +183,10 @@ def fill_export(parsed: ParsedExport, fetch_results, file_bytes=None):
                 continue
             out = list(base)
             out[i_ft] = render_text(m)
+            if "Author" in cols and len(out) > cols["Author"]:
+                out[cols["Author"]] = parse_author(m)
+            if "Title" in cols and len(out) > cols["Title"]:
+                out[cols["Title"]] = render_title(m)
             dt = parse_dt(m)
             if dt:
                 c = WriteOnlyCell(ws, value=dt)
@@ -238,6 +242,49 @@ def fill_export(parsed: ParsedExport, fetch_results, file_bytes=None):
         "author_count": len(author_stats),
     }
     return out_buf, stats
+
+
+def load_sheet_for_enrichment(file_bytes):
+    """Open an already-filled xlsx (Mention Filler's output, or one the user
+    uploaded pre-filled) for a module that reads existing columns and appends
+    new ones. Returns (workbook, worksheet, header_row_1based, col_index)
+    where col_index maps column name -> 1-based column number for every
+    column currently in the sheet (original + anything appended so far).
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    ws = wb.worksheets[0]
+    header_row_1based = None
+    for r in range(1, min(31, ws.max_row + 1)):
+        if ws.cell(row=r, column=1).value == "Query Id":
+            header_row_1based = r
+            break
+    if header_row_1based is None:
+        raise BadExport("Could not find the 'Query Id' header row — is this a filled Bulk Mentions export?")
+    col_index = {}
+    for c in range(1, ws.max_column + 1):
+        name = ws.cell(row=header_row_1based, column=c).value
+        if name:
+            col_index[name] = c
+    return wb, ws, header_row_1based, col_index
+
+
+def ensure_columns(ws, header_row_1based, col_index, new_col_names):
+    """Append any of new_col_names not already present; return the (possibly
+    updated) col_index including their positions."""
+    next_col = ws.max_column + 1
+    for name in new_col_names:
+        if name not in col_index:
+            ws.cell(row=header_row_1based, column=next_col, value=name)
+            col_index[name] = next_col
+            next_col += 1
+    return col_index
+
+
+def iter_data_rows(ws, header_row_1based, col_index):
+    """Yield (row_number, {column_name: value}) for every data row."""
+    for row_num in range(header_row_1based + 1, ws.max_row + 1):
+        row_dict = {name: ws.cell(row=row_num, column=c).value for name, c in col_index.items()}
+        yield row_num, row_dict
 
 
 def unmatched_csv_bytes(unmatched):

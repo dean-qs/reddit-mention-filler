@@ -30,7 +30,7 @@ class MentionFillerModule(AnalysisModule):
     def render_options(self, st, key_prefix):
         return {}
 
-    def estimate(self, parsed, params) -> Estimate:
+    def estimate(self, parsed, params, context) -> Estimate:
         n = len(parsed.urls)
         est_seconds = (n / ARCHIVE_RATE_PER_MIN) * 60
         return Estimate(
