@@ -1,0 +1,14 @@
+# secrets — never commit the real one, only secrets.toml.example
+.streamlit/secrets.toml
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# local scratch / test data — don't commit real exports or run output
+work_*/
+*.xlsx
+*.csv
+.DS_Store
