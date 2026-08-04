@@ -17,23 +17,24 @@ from core.mentions_io import BadExport, parse_export
 from modules.base import LLMEnrichmentModule
 from modules.registry import MODULES
 
-st.set_page_config(page_title="Reddit Mention Filler", page_icon="🧵", layout="centered")
+st.set_page_config(page_title="QS Reddit Mention Filler", page_icon="🧵", layout="centered")
 
-st.title("🧵 Reddit Mention Filler")
-st.caption("Quadrant Strategies")
+st.title("🧵 QS Reddit Mention Filler")
+st.caption("Team Digital")
 st.write(
-    "Turn a Bulk Mentions export (Reddit rows with text withheld) into a filled, enriched copy — "
-    "no Python, no installs. Upload the export, pick your modules, review the estimate, run."
+    "Turn a Bulk Mentions export (Reddit rows with text withheld) into a filled, enriched copy "
+    "without having to install Python or anything! Upload the BW export, pick how you want to process it, "
+    "review the estimate, and then you should be good to run :)"
 )
 
 with st.expander("What is this / how does it work?"):
     st.markdown(
         "Our social-listening tool's Bulk Mentions export withholds Reddit text "
         "(*\"Due to licensing restrictions, this mention cannot be downloaded\"*) and leaves "
-        "Date empty. **Mention Filler** looks up every URL in the free "
+        "Date and Author empty. This **Mention Filler** looks up every URL in the free "
         "[Arctic Shift](https://arctic-shift.photon-reddit.com/) Reddit archive and fills in "
-        "Date + Full Text (plus Score, Type, Edited, and linked-URL columns), and adds an "
-        "Author Rollup sheet. Rows the archive doesn't have (usually well under 1%) are listed "
+        "Date, Author, and Full Text (plus Score, whether or not the post was edited, and any sites it links to), and adds an "
+        "Author Rollup sheet so we can see the most vocal authors. Rows that Arctic Shift doesn't have (usually well under 1%) are listed "
         "in a separate `unmatched.csv` rather than live-scraped.\n\n"
         "**Sentiment Coding** and **Geolocation** are optional LLM-powered add-ons that run on "
         "top of the filled text (OpenAI gpt-4o-mini) — each shows its own estimated cost before "
