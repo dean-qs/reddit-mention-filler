@@ -27,7 +27,7 @@ class MentionFillerModule(AnalysisModule):
     label = "Mention Filler"
     description = "Fill in Date + Full Text for every Reddit URL in a Bulk Mentions export."
 
-    def render_options(self, st, key_prefix):
+    def render_options(self, st, key_prefix, parsed=None, file_bytes=None, filename=None):
         return {}
 
     def estimate(self, parsed, params, context) -> Estimate:

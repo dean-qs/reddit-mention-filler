@@ -37,9 +37,13 @@ class AnalysisModule:
     key = "base"
     label = "Base module"
     description = ""
+    uses_paid_api = False  # override to True on any module that spends real $ (for app.py's badge)
 
-    def render_options(self, st, key_prefix):
-        """Draw this module's Streamlit widgets and return a params dict."""
+    def render_options(self, st, key_prefix, parsed=None, file_bytes=None, filename=None):
+        """Draw this module's Streamlit widgets and return a params dict.
+        parsed/file_bytes/filename describe the currently-uploaded export, for
+        modules that need to preview/scan actual data while rendering options
+        (e.g. discovering entities under a Brandwatch parent category)."""
         return {}
 
     def estimate(self, parsed, params, context) -> Estimate:
@@ -59,6 +63,7 @@ class LLMEnrichmentModule(AnalysisModule):
     detects LLMEnrichmentModule instances and routes them through
     core/llm_enrichment.py's combined-call orchestrator.
     """
+    uses_paid_api = True
 
     def output_columns(self, params) -> list:
         """New column names (in order) this module writes."""
@@ -68,8 +73,14 @@ class LLMEnrichmentModule(AnalysisModule):
         """Static instructions for this module, merged into one shared system prompt."""
         raise NotImplementedError
 
-    def json_schema_fragment(self, params) -> dict:
-        """{'properties': {...}, 'required': [...]} merged into one shared JSON schema."""
+    def json_schema_fragment(self, row: dict, params) -> dict:
+        """{'properties': {...}, 'required': [...]} merged into that row's JSON
+        schema. The schema is rebuilt per row, not once for the whole run, so a
+        module can ask for different (or zero) fields depending on the row —
+        e.g. multi-entity Sentiment Coding only requests entities its regex
+        prefilter found in THIS row's text. Return {} / no properties to opt
+        this module out of this row entirely (costs nothing for it that row).
+        Modules that don't need row-dependent schemas just ignore `row`."""
         raise NotImplementedError
 
     def row_context(self, row: dict, params) -> dict:
@@ -78,9 +89,12 @@ class LLMEnrichmentModule(AnalysisModule):
         (as plain strings) this module wants in the per-row user message."""
         raise NotImplementedError
 
-    def columns_from_result(self, result: dict, params) -> dict:
+    def columns_from_result(self, row: dict, result: dict, params) -> dict:
         """result is this row's parsed JSON (all modules' fields together — pick
-        out your own). Return {column_name: value} to write."""
+        out your own), or None if the row was never sent to the API (every
+        module opted out via an empty json_schema_fragment that row). Return
+        {column_name: value} to write — including sensible defaults for the
+        result-is-None / my-fields-weren't-requested-this-row cases."""
         raise NotImplementedError
 
     def estimate_tokens_per_row(self, parsed, params, context) -> tuple:

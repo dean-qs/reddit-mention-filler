@@ -11,9 +11,11 @@ No changes to app.py are needed.
 from .geolocation import GeolocationModule
 from .mention_filler import MentionFillerModule
 from .sentiment import SentimentModule
+from .theme_summary import ThemeSummaryModule
 
 MODULES = [
     MentionFillerModule(),
     SentimentModule(),
     GeolocationModule(),
+    ThemeSummaryModule(),
 ]

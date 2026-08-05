@@ -19,19 +19,28 @@ DEFAULT_INSTRUCTIONS = (
     "the subreddit, post title, full text, and the detected signals below as "
     "evidence. Prefer the actual content of the text over the signals when "
     "they conflict — the signals are hints, not proof.\n\n"
+    "Make an actual guess in almost every case. 'Unknown' should be rare — reserve "
+    "it for text that's genuinely too short or generic to carry ANY signal (e.g. a "
+    "one-word reply). A Low-confidence guess is far more useful than 'Unknown' and "
+    "is the expected, normal output for a large share of these mentions — don't "
+    "treat Low confidence as a reason to fall back to 'Unknown' instead.\n\n"
+    "Tie-breaker when evidence is thin: Reddit's user base skews heavily toward the "
+    "United States. If the text is in English and nothing above points elsewhere, "
+    "guess 'United States' at Low confidence rather than 'Unknown' — that is "
+    "usually the better bet, not a cop-out. Only skip this tie-breaker if some "
+    "signal actively points to a different country.\n\n"
     "Give a specific US state or region in 'Geo - Region' ONLY when the "
     "country is the United States AND there's real textual evidence for a "
     "specific state/region (e.g. a named city, sports team, local reference). "
-    "Otherwise leave 'Geo - Region' blank. Use 'Unknown' for 'Geo - Country' "
-    "if there truly isn't enough evidence to guess — don't force a country "
-    "when the mention gives nothing to go on."
+    "Otherwise leave 'Geo - Region' blank."
 )
 
 OUTPUT_INSTRUCTIONS = (
-    "\n\nRespond with: 'Geo - Country' (a country name, or 'Unknown'), "
-    "'Geo - Region' (a US state/region name, or '' if not applicable/not confident), "
-    "'Geo - Confidence' (High, Medium, or Low — be honest; most single Reddit "
-    "mentions warrant Medium or Low), and 'Geo - Rationale' (a short clause, "
+    "\n\nRespond with: 'Geo - Country' (a country name — avoid 'Unknown' except "
+    "as a last resort, see above), 'Geo - Region' (a US state/region name, or '' "
+    "if not applicable/not confident), 'Geo - Confidence' (High, Medium, or Low — "
+    "most single Reddit mentions genuinely warrant Low or Medium, that's expected "
+    "and not a sign you got it wrong), and 'Geo - Rationale' (a short clause, "
     "under 15 words, naming the key evidence used)."
 )
 
@@ -41,7 +50,7 @@ class GeolocationModule(LLMEnrichmentModule):
     label = "Geolocation (beta)"
     description = "Estimate the author's likely country / US region from subreddit, title, and text."
 
-    def render_options(self, st, key_prefix):
+    def render_options(self, st, key_prefix, parsed=None, file_bytes=None, filename=None):
         custom = ""
         with st.expander("Instructions the LLM will get (editable)"):
             custom = st.text_area(
@@ -59,7 +68,7 @@ class GeolocationModule(LLMEnrichmentModule):
     def system_prompt_fragment(self, params):
         return params["instructions"] + OUTPUT_INSTRUCTIONS
 
-    def json_schema_fragment(self, params):
+    def json_schema_fragment(self, row, params):
         return {
             "properties": {
                 "Geo - Country": {"type": "string"},
@@ -82,7 +91,8 @@ class GeolocationModule(LLMEnrichmentModule):
             "Detected signals (evidence only, not ground truth)": "; ".join(signals) if signals else "none detected",
         }
 
-    def columns_from_result(self, result, params):
+    def columns_from_result(self, row, result, params):
+        result = result or {}
         return {
             "Geo - Country": result.get("Geo - Country", ""),
             "Geo - Region": result.get("Geo - Region", ""),
@@ -105,7 +115,8 @@ class GeolocationModule(LLMEnrichmentModule):
             f"Uses OpenAI gpt-4o-mini — estimated cost: ${cost:,.2f} for {n:,} rows "
             f"(~{in_tok:,} input + {out_tok:,} output tokens/row, rough).",
             "Beta: single-mention geolocation is inherently uncertain — expect a lot of "
-            "Medium/Low confidence and 'Unknown' results, by design rather than a bug.",
+            "Low/Medium confidence results. 'Unknown' should be rare (the model is told "
+            "to guess, with a US-skew tie-breaker, rather than default to it).",
             "Real cost is computed from actual token usage after the run and shown in the results.",
         ]
         if not context.get("text_will_be_filled"):

@@ -1,16 +1,21 @@
 """Reddit Mention Filler — Streamlit front end.
 
-Upload (or paste) a Bulk Mentions export, pick which analysis modules to run,
-see an estimate (row count / time / cost) before anything executes, then run
-and download the result. See modules/registry.py for how to add new modules.
+Gated behind a @quadstrat.com email check (core/access_gate.py) since this
+can spend real OpenAI credits. Upload (or paste) a Bulk Mentions export, pick
+which analysis modules to run, see an estimate (row count / time / cost)
+before anything executes, then run and download the result. See
+modules/registry.py for how to add new modules.
 
 Modules come in two flavors (see modules/base.py): plain AnalysisModules
-(Mention Filler) and LLMEnrichmentModules (Sentiment Coding, Geolocation).
-Any LLMEnrichmentModules selected together are merged into ONE LLM call per
-row by core/llm_enrichment.py, instead of one call per module per row.
+(Mention Filler, Theme Summary — each manages its own run however it needs
+to) and LLMEnrichmentModules (Sentiment Coding, Geolocation) — any number of
+those selected together are merged into ONE LLM call per row by
+core/llm_enrichment.py, instead of one call per module per row.
 """
 import streamlit as st
 
+from core.access_gate import require_quadstrat_email
+from core.cost_caps import CostCapExceeded, max_cost_usd_per_run
 from core.llm_client import MissingApiKey
 from core.llm_enrichment import run_llm_modules
 from core.mentions_io import BadExport, parse_export
@@ -18,6 +23,7 @@ from modules.base import LLMEnrichmentModule
 from modules.registry import MODULES
 
 st.set_page_config(page_title="Reddit Mention Filler", page_icon="🧵", layout="centered")
+require_quadstrat_email(st)
 
 st.title("🧵 Reddit Mention Filler")
 st.caption("Quadrant Strategies")
@@ -35,10 +41,15 @@ with st.expander("What is this / how does it work?"):
         "Date + Full Text (plus Score, Type, Edited, and linked-URL columns), and adds an "
         "Author Rollup sheet. Rows the archive doesn't have (usually well under 1%) are listed "
         "in a separate `unmatched.csv` rather than live-scraped.\n\n"
-        "**Sentiment Coding** and **Geolocation** are optional LLM-powered add-ons that run on "
-        "top of the filled text (OpenAI gpt-4o-mini) — each shows its own estimated cost before "
-        "you run it, and the real cost from actual usage afterward. Both need Full Text already "
-        "filled in, so run Mention Filler first (in the same pass, or on an already-filled file)."
+        "**Sentiment Coding**, **Geolocation**, and **Theme Summary** are optional LLM-powered "
+        "add-ons that run on top of the filled text (OpenAI gpt-4o-mini) — each shows its own "
+        "estimated cost before you run it, and the real cost from actual usage afterward. All "
+        "three need Full Text already filled in, so run Mention Filler first (in the same pass, "
+        "or on an already-filled file). Sentiment Coding can score general tone, sentiment toward "
+        "one or more named entities (by alias list or Brandwatch parent category), or a fully "
+        "custom prompt.\n\n"
+        "This tool can spend real OpenAI credits, so it's gated to Quadrant emails, and a "
+        "row-count / cost cap in Secrets backstops accidental huge runs."
     )
 
 st.divider()
@@ -83,7 +94,7 @@ if parsed is not None:
     selected = []
     module_params = {}
     for mod in MODULES:
-        badge = "🟢 free" if not isinstance(mod, LLMEnrichmentModule) else "💵 paid (OpenAI)"
+        badge = "💵 paid (OpenAI)" if mod.uses_paid_api else "🟢 free"
         checked = st.checkbox(
             f"**{mod.label}** · _{badge}_ — {mod.description}",
             value=(mod.key == "mention_filler"),
@@ -91,7 +102,9 @@ if parsed is not None:
         )
         if checked:
             with st.container(border=True):
-                module_params[mod.key] = mod.render_options(st, key_prefix=mod.key)
+                module_params[mod.key] = mod.render_options(
+                    st, key_prefix=mod.key, parsed=parsed, file_bytes=file_bytes, filename=filename
+                )
             selected.append(mod)
 
     run_context = {"text_will_be_filled": any(m.key == "mention_filler" for m in selected)}
@@ -124,12 +137,21 @@ if parsed is not None:
                 "is usually a bit lower than this sum."
             )
 
+        cost_cap = max_cost_usd_per_run()
+        cap_exceeded = has_llm and total_cost > cost_cap
+        if cap_exceeded:
+            st.error(
+                f"Estimated cost (${total_cost:,.2f}) is above this app's configured cap "
+                f"(${cost_cap:,.2f} — MAX_LLM_COST_USD_PER_RUN in Secrets). Reduce scope, or raise "
+                f"the cap in Secrets if this run is intentional."
+            )
+
         # -------------------------------------------------------------
         # 4. Run
         # -------------------------------------------------------------
         st.divider()
         st.header("4. Run")
-        if st.button("Run", type="primary"):
+        if st.button("Run", type="primary", disabled=cap_exceeded):
             current_bytes, current_filename = file_bytes, filename
             all_summary = []
             all_extra_files = {}
@@ -157,6 +179,8 @@ if parsed is not None:
                         lines = [f"{cost_summary['n_rows']:,} rows enriched"]
                         if cost_summary["n_skipped"]:
                             lines[0] += f", {cost_summary['n_skipped']:,} skipped (Full Text not filled)"
+                        if cost_summary.get("n_no_signal"):
+                            lines[0] += f", {cost_summary['n_no_signal']:,} skipped (no configured entity detected — free)"
                         if cost_summary["n_failed"]:
                             lines[0] += f", {cost_summary['n_failed']:,} failed after retries"
                         lines.append(
@@ -178,6 +202,9 @@ if parsed is not None:
                         all_extra_files.update(result.extra_files)
                         i += 1
             except MissingApiKey as e:
+                st.error(str(e))
+                st.stop()
+            except CostCapExceeded as e:
                 st.error(str(e))
                 st.stop()
             except BadExport as e:

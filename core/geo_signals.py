@@ -28,6 +28,27 @@ _AMERICAN_WORDS = re.compile(
     re.I,
 )
 
+# Numeric formatting conventions — distinctive enough (multi-digit grouping +
+# decimal suffix) to avoid firing on an ordinary lone decimal like "1.234".
+_EU_STYLE_NUMBER = re.compile(r"\b\d{1,3}(?:\.\d{3})+,\d{1,2}\b")   # "1.234,56" — most of Europe/Latin America
+_US_STYLE_NUMBER = re.compile(r"\b\d{1,3}(?:,\d{3})+\.\d{1,2}\b")  # "1,234.56" — US/UK
+
+# Spanish dialect tells — Iberian (vosotros forms, Spain-specific vocabulary) vs.
+# the LatAm counterparts. "ustedes" alone is weak evidence (Spain uses it too, just
+# formally-only) so it's included but shouldn't be read as strong on its own.
+_IBERIAN_SPANISH = re.compile(
+    r"\b(vosotros|vosotras|vuestro|vuestra|vuestros|vuestras|"
+    r"ordenador|ordenadores|m[oó]vil|m[oó]viles|coche|coches)\b|"
+    r"\w+[áé]is\b",  # vosotros-form verb endings (habláis, coméis) — accented, so it
+                      # doesn't also catch unrelated words (e.g. Portuguese "mais")
+    re.I,
+)
+_LATAM_SPANISH = re.compile(
+    r"\b(ustedes|computadora|computadoras|computador|celular|celulares|"
+    r"carro|carros|platicar)\b",
+    re.I,
+)
+
 # (human-readable label, regex) — other British vs. American English tells.
 _MARKERS = [
     ("British spelling (colour/organise/centre/etc.)", _BRITISH_WORDS),
@@ -41,6 +62,10 @@ _MARKERS = [
     ("mom (vs. mum)", re.compile(r"\bmom\b", re.I)),
     ("American transit/daily-life terms (sidewalk, trunk of the car, gas station, zip code)",
      re.compile(r"\b(sidewalk|trunk of the car|gas station|zip code)\b", re.I)),
+    ("European/Latin-American-style decimal formatting (1.234,56)", _EU_STYLE_NUMBER),
+    ("US/UK-style decimal formatting (1,234.56)", _US_STYLE_NUMBER),
+    ("Iberian Spanish (vosotros/vuestro, ordenador, móvil, coche, -áis/-éis verb forms)", _IBERIAN_SPANISH),
+    ("Latin American Spanish (ustedes, computadora, celular, carro)", _LATAM_SPANISH),
 ]
 
 # Small, easily-extended set of subreddits that are strong geography hints on their own.

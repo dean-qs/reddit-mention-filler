@@ -83,6 +83,35 @@ def parse_export(file_bytes, filename):
         return ParsedExport(False, urls, cols=cols, header_row_1based=header_row_1based)
 
 
+def iter_column_values(file_bytes, filename, column_name):
+    """Read one named column's raw values across every data row of a Bulk
+    Mentions export (csv or xlsx, filled or not) — for a lightweight preview/
+    discovery step that doesn't need the full parse/fill machinery. Returns
+    [] if the column isn't present in this export."""
+    is_csv = filename.lower().endswith(".csv")
+    if is_csv:
+        rows = _read_csv_rows(file_bytes)
+        hdr_i, _ = locate_header(rows)
+        header = [c if c is not None else "" for c in rows[hdr_i]]
+        if column_name not in header:
+            return []
+        idx = header.index(column_name)
+        return [r[idx] if len(r) > idx else "" for r in rows[hdr_i + 1:]]
+    else:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
+        ws = wb.worksheets[0]
+        head = [list(row) for row in ws.iter_rows(min_row=1, max_row=30, values_only=True)]
+        hdr_i, _ = locate_header(head)
+        header = [c if c is not None else "" for c in head[hdr_i]]
+        if column_name not in header:
+            wb.close()
+            return []
+        idx = header.index(column_name)
+        values = [row[idx] if len(row) > idx else "" for row in ws.iter_rows(min_row=hdr_i + 2, values_only=True)]
+        wb.close()
+        return values
+
+
 def write_rollup_sheet(wb, author_stats):
     ws = wb.create_sheet("Author Rollup")
     ws.append(["Author", "Total Mentions", "Posts", "Comments", "Total Score", "Avg Score", "First Date", "Last Date"])
