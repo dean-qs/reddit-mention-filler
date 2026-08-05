@@ -28,12 +28,12 @@ def require_quadstrat_email(st):
 
     st.title("🧵 Reddit Mention Filler")
     st.caption("Quadrant Strategies")
-    st.info("This tool can spend real OpenAI credits. Enter your Quadrant email to continue.")
-    email = st.text_input("Work email", placeholder="you@quadstrat.com")
+    st.info("Enter your email to access this tool.")
+    email = st.text_input("Work email", placeholder="your@email.com")
     if st.button("Continue"):
         if _is_allowed(email):
             st.session_state["_gate_email_ok"] = True
             st.rerun()
         else:
-            st.error(f"That doesn't look like a @{ALLOWED_DOMAIN} email — access is limited to the Quadrant team.")
+            st.error(f"That doesn't look like the right domain — access is limited to the team this was built for.")
     st.stop()
