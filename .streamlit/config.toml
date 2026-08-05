@@ -4,7 +4,7 @@
 # best-effort match and swap them out if the firm's actual brand kit differs.
 [theme]
 primaryColor = "#a91e2a"
-backgroundColor = "#abb8c3"
+backgroundColor = "#f2f5fe"
 secondaryBackgroundColor = "#f1f3f5"
 textColor = "#1a1a1a"
 font = "sans serif"
