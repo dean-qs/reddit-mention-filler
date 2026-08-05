@@ -3,10 +3,12 @@ Geolocation, so it's a plain AnalysisModule with its own two-phase flow
 rather than an LLMEnrichmentModule plugged into the shared combined-call
 coordinator):
 
-  1. Discover: sample up to `sample_size` filled mentions, ask the LLM once
-     for up to `n_themes` recurring themes (name + description).
-  2. Tag: ask the LLM, once per eligible row, which discovered theme fits
-     best (or "Other / none of the above").
+  1. Discover: either auto-discover — sample up to `sample_size` filled
+     mentions, ask the LLM once for up to `n_themes` recurring themes (name +
+     description) — or use a predefined list the user typed in, which skips
+     this call (and its cost) entirely.
+  2. Tag: ask the LLM, once per eligible row, which theme fits best (or
+     "Other / none of the above").
 
 Writes a "Theme" (+ rationale) column on every row plus a "Theme Summary"
 sheet: theme, description, count, and a couple of example quotes.
@@ -105,6 +107,22 @@ def _add_usage(totals, usage):
     totals["output"] += usage.completion_tokens or 0
 
 
+def _parse_manual_themes(text):
+    """One theme per line: 'ThemeName: description'. Description is optional
+    (falls back to empty) but a name is required for the line to count."""
+    themes = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, _, desc = line.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        themes.append({"name": name, "description": desc.strip()})
+    return themes
+
+
 class ThemeSummaryModule(AnalysisModule):
     key = "theme_summary"
     label = "Theme Summary"
@@ -113,33 +131,71 @@ class ThemeSummaryModule(AnalysisModule):
 
     def render_options(self, st, key_prefix, parsed=None, file_bytes=None, filename=None):
         n_rows = len(parsed.urls) if parsed else 200
-        n_themes = st.slider("Number of themes to identify", 3, 12, 6, key=f"{key_prefix}_n_themes")
-        sample_size = st.slider(
-            "Sample size for theme discovery", 20, 500, min(150, n_rows), key=f"{key_prefix}_sample_size",
-            help="How many mentions the discovery step reads to propose themes. Every row still "
-                 "gets tagged afterward, regardless of this number — this only controls the "
-                 "one-time discovery call's cost.",
+        source = st.radio(
+            "How should themes be determined?",
+            ["Discover automatically", "I'll define them myself"],
+            key=f"{key_prefix}_source",
         )
-        return {"n_themes": n_themes, "sample_size": sample_size}
+        params = {"theme_source": "auto" if source == "Discover automatically" else "manual",
+                  "n_themes": 0, "sample_size": 0, "manual_themes_text": ""}
+
+        if params["theme_source"] == "auto":
+            params["n_themes"] = st.slider("Number of themes to identify", 3, 12, 6, key=f"{key_prefix}_n_themes")
+            params["sample_size"] = st.slider(
+                "Sample size for theme discovery", 20, 500, min(150, n_rows), key=f"{key_prefix}_sample_size",
+                help="How many mentions the discovery step reads to propose themes. Every row still "
+                     "gets tagged afterward, regardless of this number — this only controls the "
+                     "one-time discovery call's cost.",
+            )
+        else:
+            manual_text = st.text_area(
+                "One theme per line: ThemeName: description",
+                height=140,
+                key=f"{key_prefix}_manual_themes",
+                placeholder="Addiction/Overuse: concern about excessive or compulsive use\n"
+                            "Customer Support: experiences with the support/help team\n"
+                            "Bugs/Technical Issues: complaints about bugs or broken updates",
+                help="Skips the discovery call entirely (and its cost) — every row is tagged "
+                     "directly against this list.",
+            )
+            params["manual_themes_text"] = manual_text
+            themes = _parse_manual_themes(manual_text)
+            if themes:
+                st.caption(f"{len(themes)} themes defined: {', '.join(t['name'] for t in themes)}")
+        return params
 
     # ------------------------------------------------------------- estimate ---
     def estimate(self, parsed, params, context) -> Estimate:
         n = len(parsed.urls)
-        sample = min(params["sample_size"], n)
-        discovery_in = sample * (SAMPLE_TEXT_CHARS // 4 + 10) + 100
-        discovery_out = params["n_themes"] * 30 + 20
-        tag_in_per_row = rough_token_estimate(TAG_SYSTEM_PROMPT_TEMPLATE) + params["n_themes"] * 15 + 200
+        manual = params.get("theme_source") == "manual"
+        lines = []
+
+        if manual:
+            manual_themes = _parse_manual_themes(params.get("manual_themes_text"))
+            discovery_in = discovery_out = 0
+            n_themes_for_estimate = len(manual_themes)
+            if not manual_themes:
+                lines.append("⚠️ No themes defined yet — add at least one 'ThemeName: description' "
+                              "line above, or every row will just be tagged 'Other'.")
+            else:
+                lines.append(f"{len(manual_themes)} themes predefined — skips the discovery call "
+                              f"entirely (and its cost).")
+        else:
+            sample = min(params["sample_size"], n)
+            discovery_in = sample * (SAMPLE_TEXT_CHARS // 4 + 10) + 100
+            discovery_out = params["n_themes"] * 30 + 20
+            n_themes_for_estimate = params["n_themes"]
+            lines.append(f"Discovery: one call reading a {sample:,}-row sample to propose up to "
+                         f"{params['n_themes']} themes.")
+
+        tag_in_per_row = rough_token_estimate(TAG_SYSTEM_PROMPT_TEMPLATE) + n_themes_for_estimate * 15 + 200
         tag_out_per_row = 20
         total_in = discovery_in + tag_in_per_row * n
         total_out = discovery_out + tag_out_per_row * n
         cost = total_in / 1_000_000 * PRICE_PER_1M_INPUT + total_out / 1_000_000 * PRICE_PER_1M_OUTPUT
-        lines = [
-            f"Discovery: one call reading a {sample:,}-row sample to propose up to "
-            f"{params['n_themes']} themes.",
-            f"Tagging: {n:,} calls (one per row) to assign each mention to a theme.",
-            f"Uses OpenAI gpt-4o-mini — estimated cost: ${cost:,.2f} total, rough.",
-            "Real cost is computed from actual token usage after the run and shown in the results.",
-        ]
+        lines.append(f"Tagging: {n:,} calls (one per row) to assign each mention to a theme.")
+        lines.append(f"Uses OpenAI gpt-4o-mini — estimated cost: ${cost:,.2f} total, rough.")
+        lines.append("Real cost is computed from actual token usage after the run and shown in the results.")
         if not context.get("text_will_be_filled"):
             lines.insert(0, "⚠️ Full Text doesn't look filled yet in this file — run Mention Filler "
                              "first (in this same run, or upload an already-filled export) or this "
@@ -176,26 +232,36 @@ class ThemeSummaryModule(AnalysisModule):
                 summary_lines=["No filled rows to summarize — nothing to do."],
             )
 
-        # ---- Phase 1: discover themes from a sample ----
-        if progress_cb:
-            progress_cb(0.0, "Discovering themes from a sample...")
-        sample = random.sample(eligible, min(params["sample_size"], len(eligible)))
-        sample_lines = [
-            f"{i+1}. {str(row.get('Full Text') or '')[:SAMPLE_TEXT_CHARS]}" for i, (_, row) in enumerate(sample)
-        ]
-        discovery_system = DISCOVERY_SYSTEM_PROMPT.format(n_themes=params["n_themes"])
-        discovery_user = "\n".join(sample_lines)
-        try:
-            discovery_result, discovery_usage = call_json(
-                client, _discovery_schema(params["n_themes"]), discovery_system, discovery_user
-            )
-        except Exception as e:
-            raise RuntimeError(f"Theme discovery call to OpenAI failed: {e}") from e
-        _add_usage(usage_totals, discovery_usage)
+        # ---- Phase 1: determine themes — auto-discover from a sample, or use the predefined list ----
+        manual = params.get("theme_source") == "manual"
+        sample = []
+        if manual:
+            if progress_cb:
+                progress_cb(0.0, "Using predefined themes (skipping discovery)...")
+            themes = _parse_manual_themes(params.get("manual_themes_text"))
+            if not themes:
+                raise RuntimeError("No themes defined — add at least one 'ThemeName: description' "
+                                   "line, or switch to automatic discovery.")
+        else:
+            if progress_cb:
+                progress_cb(0.0, "Discovering themes from a sample...")
+            sample = random.sample(eligible, min(params["sample_size"], len(eligible)))
+            sample_lines = [
+                f"{i+1}. {str(row.get('Full Text') or '')[:SAMPLE_TEXT_CHARS]}" for i, (_, row) in enumerate(sample)
+            ]
+            discovery_system = DISCOVERY_SYSTEM_PROMPT.format(n_themes=params["n_themes"])
+            discovery_user = "\n".join(sample_lines)
+            try:
+                discovery_result, discovery_usage = call_json(
+                    client, _discovery_schema(params["n_themes"]), discovery_system, discovery_user
+                )
+            except Exception as e:
+                raise RuntimeError(f"Theme discovery call to OpenAI failed: {e}") from e
+            _add_usage(usage_totals, discovery_usage)
+            themes = discovery_result.get("themes") or []
+            if not themes:
+                raise RuntimeError("Theme discovery returned no themes — try a larger sample or fewer/more themes.")
 
-        themes = discovery_result.get("themes") or []
-        if not themes:
-            raise RuntimeError("Theme discovery returned no themes — try a larger sample or fewer/more themes.")
         theme_names = [t["name"] for t in themes]
         theme_descriptions = {t["name"]: t.get("description", "") for t in themes}
 
@@ -276,8 +342,13 @@ class ThemeSummaryModule(AnalysisModule):
         out_buf.seek(0)
 
         cost = _usage_cost(usage_totals)
+        theme_source_line = (
+            f"Used {len(theme_names)} predefined themes: {', '.join(theme_names)}"
+            if manual else
+            f"Discovered {len(theme_names)} themes from a {len(sample):,}-row sample: {', '.join(theme_names)}"
+        )
         summary_lines = [
-            f"Discovered {len(theme_names)} themes from a {len(sample):,}-row sample: {', '.join(theme_names)}",
+            theme_source_line,
             f"Tagged {len(eligible) - n_failed:,} of {len(eligible):,} eligible rows"
             + (f", {n_failed:,} failed after retries" if n_failed else ""),
             f"Actual cost: ${cost:,.4f} ({usage_totals['input']:,} input + "

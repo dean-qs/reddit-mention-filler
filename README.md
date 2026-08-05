@@ -38,10 +38,12 @@ core/
 modules/
   base.py                  AnalysisModule + LLMEnrichmentModule interfaces
   mention_filler.py        fetch + fill (plain AnalysisModule, no LLM)
-  sentiment.py              general / toward-an-entity / multiple-entities / custom-prompt
+  sentiment.py              general / toward-an-entity / multiple-entities / custom-prompt;
+                           writes LLM-prefixed columns + Sentiment Breakdown/Long sheets
   geolocation.py            country (+ US region when confident) from subreddit/title/text
-  theme_summary.py          discover themes from a sample, tag every row (plain
-                           AnalysisModule — two-phase, doesn't fit the per-row coordinator)
+  theme_summary.py          discover themes from a sample (or use a predefined list), tag
+                           every row (plain AnalysisModule — two-phase, doesn't fit the
+                           per-row coordinator)
   registry.py               MODULES list app.py reads — add a module here, nothing else
 ```
 
@@ -66,7 +68,10 @@ write. `json_schema_fragment`/`columns_from_result` receive the row, so a
 module can opt out of a given row entirely (return no properties) when it
 has nothing to ask — e.g. multi-entity Sentiment Coding only asks about
 entities its regex/category prefilter actually found in that row's text; if
-every module opts out, the row skips the API call altogether.
+every module opts out, the row skips the API call altogether. Optionally
+implement `build_extra_sheets(wb, params, row_values)` to append aggregate/
+summary sheets after the main per-row writing pass (see Sentiment Coding's
+Breakdown/Long sheets).
 
 Either way, `app.py` doesn't change. Modules run in sequence in one
 session; each module's output workbook becomes the next module's input
@@ -95,6 +100,42 @@ Two ways to define entities (Sentiment Coding → "Multiple entities"):
 
 Either way, each row only gets asked (and costs tokens) for entities it
 plausibly mentions; the rest are written "Not Mentioned" for free.
+
+Output columns are named `LLM Sentiment` / `LLM Sentiment Rationale` (or
+`LLM Sentiment: <entity>` in multi-entity mode) rather than plain
+`Sentiment` — Brandwatch exports already carry their own native `Sentiment`
+column, and writing to `Sentiment` would silently overwrite Brandwatch's
+own values. **Any new module should follow the same `LLM `-prefix
+convention** for columns that might collide with a source column BW already
+populates (`Sentiment`, `Country`, `Language`, etc.).
+
+Two extra sheets get added alongside the main output:
+- **Sentiment Breakdown** — Positive/Negative/Neutral counts + Net Sentiment
+  (`(Positive - Negative) / Total Assessed`), one row per entity in multi-
+  entity mode, or a single overall row otherwise.
+- **Sentiment Long** (multi-entity mode only) — one row per (mention,
+  entity) pair actually assessed (Url, Entity, Sentiment, Rationale),
+  skipping "Not Mentioned" pairs — a long/pivot-friendly view alongside the
+  wide per-entity columns on the main sheet, without restructuring the main
+  sheet's rows (which every other module relies on staying stable).
+
+## Theme Summary: predefined vs. discovered themes
+
+Theme Summary defaults to auto-discovering themes from a data sample, but
+can also take a predefined list (`ThemeName: description` per line) that
+skips the discovery call entirely — useful when you already know the
+buckets you want (e.g. a recurring monthly report with a fixed taxonomy).
+
+## Mixed-source exports (Reddit + other platforms)
+
+Mention Filler only touches Reddit URLs — every other URL (X/Twitter, news,
+forums, whatever else Brandwatch already filled in) passes through
+completely untouched: its existing Full Text/Date/Author stay exactly as
+Brandwatch gave them, only the Fetch Status column gets tagged
+`UNPARSEABLE_URL`. That means a mixed-source Brandwatch export just works
+in one pass: run Mention Filler once, only the Reddit rows get fetched, and
+every downstream module (Sentiment/Geolocation/Theme Summary) sees real
+text for every row either way — no separate handling needed.
 
 ## Access control
 

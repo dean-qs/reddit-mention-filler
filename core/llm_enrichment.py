@@ -188,6 +188,7 @@ def run_llm_modules(modules, params_by_key, file_bytes, filename, progress_cb=No
                     progress_cb(done / len(eligible), f"Enriching rows: {done:,}/{len(eligible):,}")
 
     eligible_row_nums = {row_num for row_num, _ in eligible}
+    all_values_by_row = []
     for row_num, row in all_rows:
         if row_num in results_by_row:
             values = _write_defaults(modules, params_by_key, row, results_by_row[row_num])
@@ -200,6 +201,13 @@ def run_llm_modules(modules, params_by_key, file_bytes, filename, progress_cb=No
         for c, v in values.items():
             if c in col_index:
                 ws.cell(row=row_num, column=col_index[c], value=v)
+        all_values_by_row.append((row_num, row, values))
+
+    for mod in modules:
+        own_cols = set(mod.output_columns(params_by_key[mod.key]))
+        row_values = [(row_num, row, {c: v for c, v in values.items() if c in own_cols})
+                      for row_num, row, values in all_values_by_row]
+        mod.build_extra_sheets(wb, params_by_key[mod.key], row_values)
 
     out_buf = io.BytesIO()
     wb.save(out_buf)

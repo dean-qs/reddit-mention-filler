@@ -101,5 +101,14 @@ class LLMEnrichmentModule(AnalysisModule):
         """Rough (input_tokens, output_tokens) per row, for the pre-run $ estimate."""
         raise NotImplementedError
 
+    def build_extra_sheets(self, wb, params, row_values) -> None:
+        """Optional: called once after the main per-row writing loop, with
+        row_values = [(row_num, row, {this module's output_columns: value}), ...]
+        in original row order (`row` is the original column_name->value dict,
+        e.g. for pulling Url as a row identifier). Append any aggregate/summary
+        sheets straight to `wb` (e.g. a breakdown of counts per entity) —
+        default does nothing."""
+        pass
+
     # LLMEnrichmentModule never implements run() itself — core/llm_enrichment.py
     # calls the methods above directly instead.

@@ -1,8 +1,17 @@
 """Mention Filler — the v0 module. Fetches Date + Full Text (+ metadata) for
-every URL in a Bulk Mentions export from the free Arctic Shift archive.
+every Reddit URL in a Bulk Mentions export from the free Arctic Shift archive.
 
-No live-scrape fallback in v0 (see README for why): URLs the archive doesn't
-have are listed in a downloadable unmatched.csv instead of being auto-scraped.
+Non-Reddit URLs (e.g. a mixed-source export with some X/Twitter rows mixed
+in) are left completely untouched — whatever Full Text/Date/Author Brandwatch
+already gave them stays exactly as-is, only their Fetch Status is tagged
+UNPARSEABLE_URL. That means a mixed-source file just works: run Mention
+Filler once, the Reddit rows get filled, everything else is a no-op, and
+downstream modules (Sentiment/Geolocation/Theme Summary) see real text for
+every row either way.
+
+No live-scrape fallback in v0 (see README for why): Reddit URLs the archive
+doesn't have are listed in a downloadable unmatched.csv instead of being
+auto-scraped.
 """
 from pathlib import Path
 
@@ -41,6 +50,8 @@ class MentionFillerModule(AnalysisModule):
                 "No paid APIs are used by this module — estimated cost: $0.",
                 "URLs the archive doesn't have (typically well under 1%) will be listed in a "
                 "downloadable 'unmatched.csv' rather than live-scraped — see the README for why.",
+                "Non-Reddit URLs (mixed-source exports) are left completely untouched — their "
+                "existing Full Text/Date/Author pass through as-is.",
             ],
             est_seconds=est_seconds,
             est_cost_usd=0.0,
@@ -70,8 +81,15 @@ class MentionFillerModule(AnalysisModule):
             reasons = {}
             for _, _, reason in stats["unmatched"]:
                 reasons[reason] = reasons.get(reason, 0) + 1
-            reason_str = ", ".join(f"{n_} {r}" for r, n_ in sorted(reasons.items(), key=lambda kv: -kv[1]))
-            summary_lines.append(f"{len(stats['unmatched']):,} rows could not be filled ({reason_str})")
+            non_reddit = reasons.pop("UNPARSEABLE_URL", 0)
+            if non_reddit:
+                summary_lines.append(
+                    f"{non_reddit:,} rows aren't Reddit URLs — left exactly as they were in the "
+                    f"source file (expected for a mixed-source export, not a failure)"
+                )
+            if reasons:
+                reason_str = ", ".join(f"{n_} {r}" for r, n_ in sorted(reasons.items(), key=lambda kv: -kv[1]))
+                summary_lines.append(f"{sum(reasons.values()):,} Reddit rows could not be filled ({reason_str})")
             extra_files["unmatched.csv"] = unmatched_csv_bytes(stats["unmatched"])
 
         return ModuleResult(

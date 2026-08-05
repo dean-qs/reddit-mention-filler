@@ -39,8 +39,8 @@ ENTITY_PROMPT_TEMPLATE = (
 )
 
 SINGLE_OUTPUT_INSTRUCTIONS = (
-    "\n\nRespond with 'Sentiment' as exactly one of: Positive, Neutral, Negative. "
-    "Also give 'Sentiment Rationale': a short clause (under 15 words) explaining why."
+    "\n\nRespond with 'LLM Sentiment' as exactly one of: Positive, Neutral, Negative. "
+    "Also give 'LLM Sentiment Rationale': a short clause (under 15 words) explaining why."
 )
 
 MULTI_ENTITY_INSTRUCTIONS = (
@@ -55,8 +55,8 @@ MULTI_ENTITY_INSTRUCTIONS = (
     "classify it Neutral rather than force Positive/Negative — the field is still "
     "required for every entity you're asked about.\n\n"
     "For each entity you're asked about (named EXACTLY as given), respond with two "
-    "fields: 'Sentiment: <entity name>' (Positive/Neutral/Negative) and "
-    "'Sentiment Rationale: <entity name>' (a short clause, under 15 words)."
+    "fields: 'LLM Sentiment: <entity name>' (Positive/Neutral/Negative) and "
+    "'LLM Sentiment Rationale: <entity name>' (a short clause, under 15 words)."
 )
 
 
@@ -182,7 +182,7 @@ class SentimentModule(LLMEnrichmentModule):
         return list(params.get("entity_names") or [])
 
     def _entity_columns(self, name):
-        return f"Sentiment: {name}", f"Sentiment Rationale: {name}"
+        return f"LLM Sentiment: {name}", f"LLM Sentiment Rationale: {name}"
 
     def _candidate_entities(self, row, params):
         if params.get("multi_source") == "category":
@@ -191,9 +191,12 @@ class SentimentModule(LLMEnrichmentModule):
         return detect_candidate_entities(text, params.get("compiled_patterns") or {})
 
     # --------------------------------------------------- LLMEnrichmentModule ---
+    # Columns are named "LLM Sentiment..." rather than plain "Sentiment" because
+    # Brandwatch exports already carry their own native "Sentiment" column —
+    # writing to "Sentiment" would silently overwrite Brandwatch's own values.
     def output_columns(self, params):
         if not self._is_multi(params):
-            return ["Sentiment", "Sentiment Rationale"]
+            return ["LLM Sentiment", "LLM Sentiment Rationale"]
         cols = []
         for name in self._all_entity_names(params):
             cols.extend(self._entity_columns(name))
@@ -208,10 +211,10 @@ class SentimentModule(LLMEnrichmentModule):
         if not self._is_multi(params):
             return {
                 "properties": {
-                    "Sentiment": {"type": "string", "enum": ["Positive", "Neutral", "Negative"]},
-                    "Sentiment Rationale": {"type": "string"},
+                    "LLM Sentiment": {"type": "string", "enum": ["Positive", "Neutral", "Negative"]},
+                    "LLM Sentiment Rationale": {"type": "string"},
                 },
-                "required": ["Sentiment", "Sentiment Rationale"],
+                "required": ["LLM Sentiment", "LLM Sentiment Rationale"],
             }
         candidates = self._candidate_entities(row, params)
         if not candidates:
@@ -236,8 +239,8 @@ class SentimentModule(LLMEnrichmentModule):
         result = result or {}
         if not self._is_multi(params):
             return {
-                "Sentiment": result.get("Sentiment", ""),
-                "Sentiment Rationale": result.get("Sentiment Rationale", ""),
+                "LLM Sentiment": result.get("LLM Sentiment", ""),
+                "LLM Sentiment Rationale": result.get("LLM Sentiment Rationale", ""),
             }
         candidates = set(self._candidate_entities(row, params))
         out = {}
@@ -250,6 +253,48 @@ class SentimentModule(LLMEnrichmentModule):
                 out[s_col] = "Not Mentioned"
                 out[r_col] = ""
         return out
+
+    def build_extra_sheets(self, wb, params, row_values):
+        if self._is_multi(params):
+            entity_names = self._all_entity_names(params)
+            if not entity_names:
+                return
+            counts = {name: {"Positive": 0, "Negative": 0, "Neutral": 0, "Not Mentioned": 0} for name in entity_names}
+            long_rows = []
+            for row_num, row, values in row_values:
+                url = row.get("Url", "")
+                for name in entity_names:
+                    s_col, r_col = self._entity_columns(name)
+                    sentiment = values.get(s_col, "")
+                    if sentiment in counts[name]:
+                        counts[name][sentiment] += 1
+                    if sentiment in ("Positive", "Negative", "Neutral"):
+                        long_rows.append((url, name, sentiment, values.get(r_col, "")))
+
+            breakdown_ws = wb.create_sheet("Sentiment Breakdown")
+            breakdown_ws.append(["Entity", "Positive", "Negative", "Neutral", "Not Mentioned",
+                                  "Total Assessed", "Net Sentiment"])
+            for name in entity_names:
+                c = counts[name]
+                total = c["Positive"] + c["Negative"] + c["Neutral"]
+                net = round((c["Positive"] - c["Negative"]) / total, 3) if total else ""
+                breakdown_ws.append([name, c["Positive"], c["Negative"], c["Neutral"], c["Not Mentioned"], total, net])
+
+            long_ws = wb.create_sheet("Sentiment Long")
+            long_ws.append(["Url", "Entity", "Sentiment", "Rationale"])
+            for url, name, sentiment, rationale in long_rows:
+                long_ws.append([url, name, sentiment, rationale])
+        else:
+            counts = {"Positive": 0, "Negative": 0, "Neutral": 0}
+            for row_num, row, values in row_values:
+                s = values.get("LLM Sentiment", "")
+                if s in counts:
+                    counts[s] += 1
+            total = sum(counts.values())
+            net = round((counts["Positive"] - counts["Negative"]) / total, 3) if total else ""
+            breakdown_ws = wb.create_sheet("Sentiment Breakdown")
+            breakdown_ws.append(["Positive", "Negative", "Neutral", "Total", "Net Sentiment"])
+            breakdown_ws.append([counts["Positive"], counts["Negative"], counts["Neutral"], total, net])
 
     def estimate_tokens_per_row(self, parsed, params, context):
         system_tokens = rough_token_estimate(self.system_prompt_fragment(params)) + 40
