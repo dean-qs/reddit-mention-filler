@@ -7,10 +7,11 @@ before anything executes, then run and download the result. See
 modules/registry.py for how to add new modules.
 
 Modules come in two flavors (see modules/base.py): plain AnalysisModules
-(Mention Filler, Theme Summary — each manages its own run however it needs
-to) and LLMEnrichmentModules (Sentiment Coding, Geolocation) — any number of
-those selected together are merged into ONE LLM call per row by
-core/llm_enrichment.py, instead of one call per module per row.
+(Mention Filler, Theme Summary, Driver Analysis — each manages its own run
+however it needs to) and LLMEnrichmentModules (Sentiment Coding,
+Geolocation) — any number of those selected together are merged into ONE
+LLM call per row by core/llm_enrichment.py, instead of one call per module
+per row.
 """
 import streamlit as st
 
@@ -42,13 +43,14 @@ with st.expander("What is this / how does it work?"):
         "Date, Author, and Full Text (plus Score, whether or not the post was edited, and any sites it links to), and adds an "
         "Author Rollup sheet so we can see the most vocal authors. Rows that Arctic Shift doesn't have (usually well under 1%) are listed "
         "in a separate `unmatched.csv` rather than live-scraped.\n\n"
-        "**Sentiment Coding**, **Geolocation**, and **Theme Summary** are optional LLM-powered "
-        "add-ons that run on top of the filled text (OpenAI gpt-4o-mini) — each shows its own "
-        "estimated cost before you run it, and the real cost from actual usage afterward. All "
-        "three need Full Text already filled in, so run Mention Filler first (in the same pass, "
-        "or on an already-filled file). Sentiment Coding can score general tone, sentiment toward "
-        "one or more named entities (by alias list or Brandwatch parent category), or a fully "
-        "custom prompt.\n\n"
+        "**Sentiment Coding**, **Geolocation**, **Theme Summary**, and **Driver / Barrier Analysis** "
+        "are optional LLM-powered add-ons that run on top of the filled text (OpenAI gpt-4o-mini) — "
+        "each shows its own estimated cost before you run it, and the real cost from actual usage "
+        "afterward. All need Full Text already filled in, so run Mention Filler first (in the same "
+        "pass, or on an already-filled file). Sentiment Coding can score general tone, sentiment "
+        "toward one or more named entities (by alias list or Brandwatch parent category), or a fully "
+        "custom prompt. Driver / Barrier Analysis builds on Sentiment Coding's multi-entity output to "
+        "find what themes drive positive vs. negative sentiment toward each brand.\n\n"
         "This tool can spend real OpenAI credits, so it's gated to Quadrant emails, and a "
         "row-count / cost cap in Secrets backstops accidental huge runs."
     )

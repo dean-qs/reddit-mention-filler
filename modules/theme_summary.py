@@ -19,9 +19,10 @@ import concurrent.futures
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
 from core.llm_client import call_json, get_client
-from core.llm_enrichment import PRICE_PER_1M_CACHED_INPUT, PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT
+from core.llm_cost import PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT, add_usage, new_usage_totals, usage_cost
 from core.mentions_io import BadExport, ensure_columns, iter_data_rows, load_sheet_for_enrichment
 from core.text_utils import looks_unfilled, rough_token_estimate
+from core.theme_discovery import discover_themes
 from .base import AnalysisModule, Estimate, ModuleResult
 
 SAMPLE_TEXT_CHARS = 300     # per-row truncation for the discovery prompt
@@ -45,33 +46,6 @@ TAG_SYSTEM_PROMPT_TEMPLATE = (
 )
 
 
-def _discovery_schema(n_themes):
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "theme_discovery",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "themes": {
-                        "type": "array",
-                        "maxItems": n_themes,
-                        "items": {
-                            "type": "object",
-                            "properties": {"name": {"type": "string"}, "description": {"type": "string"}},
-                            "required": ["name", "description"],
-                            "additionalProperties": False,
-                        },
-                    }
-                },
-                "required": ["themes"],
-                "additionalProperties": False,
-            },
-        },
-    }
-
-
 def _tag_schema(theme_names):
     return {
         "type": "json_schema",
@@ -89,22 +63,6 @@ def _tag_schema(theme_names):
             },
         },
     }
-
-
-def _usage_cost(usage_totals):
-    return (
-        usage_totals["input"] / 1_000_000 * PRICE_PER_1M_INPUT
-        + usage_totals["cached_input"] / 1_000_000 * PRICE_PER_1M_CACHED_INPUT
-        + usage_totals["output"] / 1_000_000 * PRICE_PER_1M_OUTPUT
-    )
-
-
-def _add_usage(totals, usage):
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = getattr(details, "cached_tokens", 0) or 0
-    totals["cached_input"] += cached
-    totals["input"] += max(0, (usage.prompt_tokens or 0) - cached)
-    totals["output"] += usage.completion_tokens or 0
 
 
 def _parse_manual_themes(text):
@@ -221,7 +179,7 @@ class ThemeSummaryModule(AnalysisModule):
                 f"the cap in Secrets if this run is intentional."
             )
 
-        usage_totals = {"input": 0, "cached_input": 0, "output": 0}
+        usage_totals = new_usage_totals()
         client = get_client()
 
         if not eligible:
@@ -246,24 +204,20 @@ class ThemeSummaryModule(AnalysisModule):
             if progress_cb:
                 progress_cb(0.0, "Discovering themes from a sample...")
             sample = random.sample(eligible, min(params["sample_size"], len(eligible)))
-            sample_lines = [
-                f"{i+1}. {str(row.get('Full Text') or '')[:SAMPLE_TEXT_CHARS]}" for i, (_, row) in enumerate(sample)
-            ]
+            sample_rows = [row for _, row in sample]
             discovery_system = DISCOVERY_SYSTEM_PROMPT.format(n_themes=params["n_themes"])
-            discovery_user = "\n".join(sample_lines)
             try:
-                discovery_result, discovery_usage = call_json(
-                    client, _discovery_schema(params["n_themes"]), discovery_system, discovery_user
+                theme_names, theme_descriptions = discover_themes(
+                    client, discovery_system, sample_rows, params["n_themes"], usage_totals
                 )
+            except RuntimeError:
+                raise
             except Exception as e:
                 raise RuntimeError(f"Theme discovery call to OpenAI failed: {e}") from e
-            _add_usage(usage_totals, discovery_usage)
-            themes = discovery_result.get("themes") or []
-            if not themes:
-                raise RuntimeError("Theme discovery returned no themes — try a larger sample or fewer/more themes.")
 
-        theme_names = [t["name"] for t in themes]
-        theme_descriptions = {t["name"]: t.get("description", "") for t in themes}
+        if manual:
+            theme_names = [t["name"] for t in themes]
+            theme_descriptions = {t["name"]: t.get("description", "") for t in themes}
 
         # ---- Phase 2: tag every eligible row ----
         theme_list_text = "\n".join(f"- {name}: {theme_descriptions[name]}" for name in theme_names)
@@ -290,7 +244,7 @@ class ThemeSummaryModule(AnalysisModule):
                 f"before running the full batch. Details: {e}"
             ) from e
         results_by_row[first_row_num] = first_content
-        _add_usage(usage_totals, first_usage)
+        add_usage(usage_totals, first_usage)
         done = 1
         if progress_cb:
             progress_cb(done / len(eligible), f"Tagging rows: {done:,}/{len(eligible):,}")
@@ -302,7 +256,7 @@ class ThemeSummaryModule(AnalysisModule):
                 try:
                     row_num, content, usage = fut.result()
                     results_by_row[row_num] = content
-                    _add_usage(usage_totals, usage)
+                    add_usage(usage_totals, usage)
                 except Exception:
                     n_failed += 1
                 done += 1
@@ -341,7 +295,7 @@ class ThemeSummaryModule(AnalysisModule):
         wb.save(out_buf)
         out_buf.seek(0)
 
-        cost = _usage_cost(usage_totals)
+        cost = usage_cost(usage_totals)
         theme_source_line = (
             f"Used {len(theme_names)} predefined themes: {', '.join(theme_names)}"
             if manual else

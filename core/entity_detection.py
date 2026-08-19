@@ -15,6 +15,10 @@ Two ways to define entities, mirroring two existing Quadrant scripts:
 import re
 from collections import Counter
 
+from core.mentions_io import read_header
+
+_SCORED_ENTITY_RE = re.compile(r"^LLM Sentiment: (.+)$")
+
 # Same two "Category Details" formats stage1_parse.py handles:
 #   Format A: {id=N, name=X, parentName=P, parentId=N}
 #   Format B: {id=N, name=X, displayName=null, parentId=N, parentName=P}
@@ -89,3 +93,18 @@ def discover_category_entities(category_details_values, parent_category):
         for name in entities_from_category_details(val, parent_category):
             counts[name] += 1
     return dict(counts)
+
+
+def detect_scored_entities(file_bytes, filename):
+    """Which entities has Sentiment Coding (multi-entity mode) already scored
+    in this file? Scans the header for "LLM Sentiment: <entity>" columns —
+    used by Driver Analysis so it doesn't need entities re-configured, and so
+    it works whether Sentiment Coding ran earlier in this same pass or on a
+    file uploaded already-processed. Returns [] (not an error) if none found."""
+    header = read_header(file_bytes, filename)
+    names = []
+    for col in header:
+        m = _SCORED_ENTITY_RE.match(col or "")
+        if m:
+            names.append(m.group(1))
+    return names

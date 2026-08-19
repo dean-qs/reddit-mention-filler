@@ -6,9 +6,9 @@ replaced by *"Due to licensing restrictions, this mention cannot be
 downloaded"* and Date empty — **Mention Filler** looks up every URL in the
 free [Arctic Shift](https://arctic-shift.photon-reddit.com/) Reddit archive
 and fills both in, plus a few extra columns (Score, Type, Edited, linked
-URLs) and an Author Rollup sheet. **Sentiment Coding**, **Geolocation**, and
-**Theme Summary** are optional LLM add-ons (OpenAI gpt-4o-mini) that run on
-top of the filled text.
+URLs) and an Author Rollup sheet. **Sentiment Coding**, **Geolocation**,
+**Theme Summary**, and **Driver / Barrier Analysis** are optional LLM
+add-ons (OpenAI gpt-4o-mini) that run on top of the filled text.
 
 No Python/Node install needed to use it — open the hosted app, sign in with
 a Quadrant email, upload or paste your export, pick modules, review the
@@ -32,7 +32,12 @@ core/
                            formatting, Iberian-vs-LatAm Spanish, subreddit hints) fed
                            into the geolocation prompt
   entity_detection.py      recall-biased alias regexes + Brandwatch "Category Details"
-                           parsing, for multi-entity Sentiment Coding
+                           parsing (multi-entity Sentiment Coding); also detects which
+                           entities are already scored, from "LLM Sentiment: X" headers
+                           (Driver Analysis reads this instead of reconfiguring entities)
+  theme_discovery.py        shared theme-discovery call (Theme Summary + Driver Analysis)
+  llm_cost.py               pricing table + usage accounting shared by every module that
+                           calls OpenAI directly
   access_gate.py           the @quadstrat.com email gate (honor-system, see below)
   cost_caps.py             MAX_LLM_ROWS_PER_RUN / MAX_LLM_COST_USD_PER_RUN backstops
 modules/
@@ -44,6 +49,8 @@ modules/
   theme_summary.py          discover themes from a sample (or use a predefined list), tag
                            every row (plain AnalysisModule — two-phase, doesn't fit the
                            per-row coordinator)
+  driver_analysis.py        per-brand thematic driver/barrier analysis on top of Sentiment
+                           Coding's entity columns (plain AnalysisModule — see below)
   registry.py               MODULES list app.py reads — add a module here, nothing else
 ```
 
@@ -119,6 +126,48 @@ Two extra sheets get added alongside the main output:
   wide per-entity columns on the main sheet, without restructuring the main
   sheet's rows (which every other module relies on staying stable).
 
+## Driver / Barrier Analysis
+
+Thematic analysis subset by brand, to find what themes are driving positive
+vs. negative sentiment toward each entity Sentiment Coding scored. Depends
+on Sentiment Coding's multi-entity mode having already run (this pass or a
+prior one) — it reads the entity list straight off whatever
+`LLM Sentiment: <entity>` columns are already in the file, so entities never
+need reconfiguring.
+
+For each entity (or the "Rest of Field" bucket in owned-vs-competitor mode):
+
+1. **Discover themes** from a sample of that entity's mentions, agnostic of
+   sentiment — the same theme can show up in both praise and criticism.
+2. **Tag every mention with every theme that genuinely applies** (multi-
+   label, not just the single best fit) **plus that mention's sentiment
+   toward each specific theme** — not reused from the mention's one overall
+   entity sentiment. This is what correctly handles a mixed post like *"YouTube
+   Kids is amazing, but I'm always worried about what happens when I leave
+   my child unattended with my iPad"* — it's rightly a driver on one theme
+   ("Kids efficacy") and a barrier on another ("Circumventing controls"),
+   not diluted into a single overall verdict.
+3. **Classify each theme** as Driver / Barrier / Neutral by net sentiment
+   (`(Positive - Negative) / Total`) against a configurable neutrality
+   threshold (default ±10%).
+4. **Write a narrative summary** per entity synthesizing its drivers and
+   barriers into a short paragraph.
+
+Two modes:
+- **By-brand** — runs the full analysis independently for every detected entity.
+- **Owned vs. competitor** — pick one owned entity; every other detected
+  entity's relevant mentions are pooled into one "Rest of Field" bucket
+  (a post mentioning two competitors contributes an entity-specific record
+  to each, same attribution logic Sentiment Coding already uses for
+  multi-brand posts).
+
+Output: a "Driver Analysis" sheet (Entity, Theme, Classification, Volume,
+Positive/Negative/Neutral counts, Net Sentiment, example quotes+links for
+both sides) and a "Driver Analysis Summary" sheet (Entity, narrative
+paragraph). No changes to the main per-row sheet — a mention's theme
+assignment differs per entity it discusses, so this is a pure aggregate
+output, like Theme Summary's summary sheet.
+
 ## Theme Summary: predefined vs. discovered themes
 
 Theme Summary defaults to auto-discovering themes from a data sample, but
@@ -174,7 +223,7 @@ A few directions that would fit the same pattern:
 
 ## Cost model
 
-Sentiment Coding, Geolocation, and Theme Summary call OpenAI gpt-4o-mini.
+Sentiment Coding, Geolocation, Theme Summary, and Driver Analysis call OpenAI gpt-4o-mini.
 Before running, each selected module reports its own rough token estimate
 and $ figure (`core/llm_enrichment.py` holds the pricing table — update it
 if OpenAI's pricing changes). After running, the actual cost is computed
@@ -208,7 +257,7 @@ streamlit run app.py
 ```
 
 `OPENAI_API_KEY` is only needed for Sentiment Coding / Geolocation / Theme
-Summary — Mention Filler alone works with no secrets at all.
+Summary / Driver Analysis — Mention Filler alone works with no secrets at all.
 
 ## Deploying
 

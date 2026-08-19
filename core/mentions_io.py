@@ -83,6 +83,26 @@ def parse_export(file_bytes, filename):
         return ParsedExport(False, urls, cols=cols, header_row_1based=header_row_1based)
 
 
+def read_header(file_bytes, filename):
+    """Return the full header row (every column name, not just the required
+    5) of a Bulk Mentions export — csv or xlsx, filled or not. Used to
+    detect which columns an earlier module (in this pass or a prior one)
+    already added, e.g. Sentiment Coding's "LLM Sentiment: <entity>" columns."""
+    is_csv = filename.lower().endswith(".csv")
+    if is_csv:
+        rows = _read_csv_rows(file_bytes)
+        hdr_i, _ = locate_header(rows)
+        return [c if c is not None else "" for c in rows[hdr_i]]
+    else:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
+        ws = wb.worksheets[0]
+        head = [list(row) for row in ws.iter_rows(min_row=1, max_row=30, values_only=True)]
+        hdr_i, _ = locate_header(head)
+        header = [c if c is not None else "" for c in head[hdr_i]]
+        wb.close()
+        return header
+
+
 def iter_column_values(file_bytes, filename, column_name):
     """Read one named column's raw values across every data row of a Bulk
     Mentions export (csv or xlsx, filled or not) — for a lightweight preview/

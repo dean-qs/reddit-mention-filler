@@ -26,13 +26,9 @@ import io
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
 from core.llm_client import call_json, get_client
+from core.llm_cost import PRICE_PER_1M_CACHED_INPUT, PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT  # noqa: F401 (re-exported)
 from core.mentions_io import BadExport, ensure_columns, iter_data_rows, load_sheet_for_enrichment
 from core.text_utils import looks_unfilled
-
-# gpt-4o-mini, as of Aug 2026 — https://devtk.ai/en/models/gpt-4o-mini/
-PRICE_PER_1M_INPUT = 0.15
-PRICE_PER_1M_CACHED_INPUT = 0.075
-PRICE_PER_1M_OUTPUT = 0.60
 
 MAX_WORKERS = 20
 SYSTEM_PREAMBLE = (
