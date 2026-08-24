@@ -22,14 +22,13 @@ Plain AnalysisModule (like Theme Summary) — multi-phase and entity-scoped,
 doesn't fit the shared per-row LLMEnrichmentModule coordinator.
 """
 import concurrent.futures
-import io
 import random
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
 from core.entity_detection import detect_scored_entities
 from core.llm_client import call_json, get_client
 from core.llm_cost import PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT, add_usage, new_usage_totals, usage_cost
-from core.mentions_io import BadExport, iter_data_rows, load_sheet_for_enrichment
+from core.mentions_io import BadExport, load_sheet_for_enrichment
 from core.text_utils import rough_token_estimate
 from core.theme_discovery import discover_themes
 from .base import AnalysisModule, Estimate, ModuleResult
@@ -338,9 +337,9 @@ class DriverAnalysisModule(AnalysisModule):
         )
 
     def run(self, parsed, file_bytes, filename, params, progress_cb=None) -> ModuleResult:
-        wb, ws, header_row_1based, col_index = load_sheet_for_enrichment(file_bytes)
+        sheet = load_sheet_for_enrichment(file_bytes)
 
-        if "Full Text" not in col_index:
+        if "Full Text" not in sheet.col_index:
             raise BadExport("No 'Full Text' column found — run Mention Filler first, or upload an already-filled export.")
 
         available = detect_scored_entities(file_bytes, filename)
@@ -350,7 +349,7 @@ class DriverAnalysisModule(AnalysisModule):
                 "mode) first, either in this same pass or on the uploaded file."
             )
 
-        all_rows = list(iter_data_rows(ws, header_row_1based, col_index))
+        all_rows = list(sheet.iter_rows())
 
         buckets = []
         if params["mode"] == "by_brand":
@@ -400,19 +399,14 @@ class DriverAnalysisModule(AnalysisModule):
                 + (f", {n_failed:,} tagging failures" if n_failed else "")
             )
 
-        theme_ws = wb.create_sheet("Driver Analysis")
-        theme_ws.append(THEME_SHEET_COLS)
-        for r in theme_sheet_rows:
-            theme_ws.append([r[c] for c in THEME_SHEET_COLS])
-
-        summary_ws = wb.create_sheet("Driver Analysis Summary")
-        summary_ws.append(["Entity", "Summary"])
-        for entity, summary_text in summary_sheet_rows:
-            summary_ws.append([entity, summary_text])
-
-        out_buf = io.BytesIO()
-        wb.save(out_buf)
-        out_buf.seek(0)
+        theme_rows_out = [[r[c] for c in THEME_SHEET_COLS] for r in theme_sheet_rows]
+        summary_rows_out = [[entity, summary_text] for entity, summary_text in summary_sheet_rows]
+        if progress_cb:
+            progress_cb(0.99, "Writing output workbook...")
+        out_bytes = sheet.to_bytes(extra_sheets=[
+            ("Driver Analysis", THEME_SHEET_COLS, theme_rows_out),
+            ("Driver Analysis Summary", ["Entity", "Summary"], summary_rows_out),
+        ])
 
         cost = usage_cost(usage_totals)
         summary_lines = bucket_summaries + [
@@ -421,4 +415,4 @@ class DriverAnalysisModule(AnalysisModule):
             "See the 'Driver Analysis' sheet for the full theme breakdown and 'Driver Analysis Summary' "
             "for a narrative per brand.",
         ]
-        return ModuleResult(output_bytes=out_buf.getvalue(), output_filename=filename, summary_lines=summary_lines)
+        return ModuleResult(output_bytes=out_bytes, output_filename=filename, summary_lines=summary_lines)

@@ -1,11 +1,10 @@
 """Common interfaces every analysis module implements.
 
-A module is deliberately narrow: given the parsed export (and the original
-file bytes, needed for the xlsx in-place-edit path), draw its own options,
-report what it's about to do (count + time + $ cost) before the run, and
-produce an output workbook. The Streamlit shell (app.py) only ever talks to
-modules through these interfaces, so adding another module later is a new
-file + one line in MODULES, not a rewrite of app.py.
+A module is deliberately narrow: given the parsed export, draw its own
+options, report what it's about to do (count + time + $ cost) before the
+run, and produce an output workbook. The Streamlit shell (app.py) only ever
+talks to modules through these interfaces, so adding another module later
+is a new file + one line in MODULES, not a rewrite of app.py.
 
 Two flavors:
   - AnalysisModule: the general case (e.g. Mention Filler).
@@ -101,14 +100,16 @@ class LLMEnrichmentModule(AnalysisModule):
         """Rough (input_tokens, output_tokens) per row, for the pre-run $ estimate."""
         raise NotImplementedError
 
-    def build_extra_sheets(self, wb, params, row_values) -> None:
+    def build_extra_sheets(self, params, row_values) -> list:
         """Optional: called once after the main per-row writing loop, with
         row_values = [(row_num, row, {this module's output_columns: value}), ...]
         in original row order (`row` is the original column_name->value dict,
-        e.g. for pulling Url as a row identifier). Append any aggregate/summary
-        sheets straight to `wb` (e.g. a breakdown of counts per entity) —
-        default does nothing."""
-        pass
+        e.g. for pulling Url as a row identifier). Return a list of
+        (sheet_name, header_row, data_rows) tuples to add (e.g. a breakdown
+        of counts per entity) — default returns no extra sheets. Plain
+        Python data, not an openpyxl object: the coordinator writes
+        everything in one pass at the very end (see core/mentions_io.py)."""
+        return []
 
     # LLMEnrichmentModule never implements run() itself — core/llm_enrichment.py
     # calls the methods above directly instead.

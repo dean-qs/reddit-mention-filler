@@ -13,14 +13,13 @@ coordinator):
 Writes a "Theme" (+ rationale) column on every row plus a "Theme Summary"
 sheet: theme, description, count, and a couple of example quotes.
 """
-import io
 import random
 import concurrent.futures
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
 from core.llm_client import call_json, get_client
 from core.llm_cost import PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT, add_usage, new_usage_totals, usage_cost
-from core.mentions_io import BadExport, ensure_columns, iter_data_rows, load_sheet_for_enrichment
+from core.mentions_io import BadExport, load_sheet_for_enrichment
 from core.text_utils import looks_unfilled, rough_token_estimate
 from core.theme_discovery import discover_themes
 from .base import AnalysisModule, Estimate, ModuleResult
@@ -162,13 +161,13 @@ class ThemeSummaryModule(AnalysisModule):
 
     # ------------------------------------------------------------------ run ---
     def run(self, parsed, file_bytes, filename, params, progress_cb=None) -> ModuleResult:
-        wb, ws, header_row_1based, col_index = load_sheet_for_enrichment(file_bytes)
-        col_index = ensure_columns(ws, header_row_1based, col_index, ["Theme", "Theme Rationale"])
+        sheet = load_sheet_for_enrichment(file_bytes)
+        sheet.ensure_columns(["Theme", "Theme Rationale"])
 
-        if "Full Text" not in col_index:
+        if "Full Text" not in sheet.col_index:
             raise BadExport("No 'Full Text' column found — run Mention Filler first, or upload an already-filled export.")
 
-        all_rows = list(iter_data_rows(ws, header_row_1based, col_index))
+        all_rows = list(sheet.iter_rows())
         eligible = [(row_num, row) for row_num, row in all_rows if not looks_unfilled(row.get("Full Text"))]
 
         cap = max_rows_per_run()
@@ -183,10 +182,8 @@ class ThemeSummaryModule(AnalysisModule):
         client = get_client()
 
         if not eligible:
-            out_buf = io.BytesIO()
-            wb.save(out_buf)
             return ModuleResult(
-                output_bytes=out_buf.getvalue(), output_filename=filename,
+                output_bytes=sheet.to_bytes(), output_filename=filename,
                 summary_lines=["No filled rows to summarize — nothing to do."],
             )
 
@@ -280,20 +277,21 @@ class ThemeSummaryModule(AnalysisModule):
                     theme_counts[theme] += 1
                     if len(theme_quotes[theme]) < 2:
                         theme_quotes[theme].append(str(row.get("Full Text") or "")[:200])
-            ws.cell(row=row_num, column=col_index["Theme"], value=theme)
-            ws.cell(row=row_num, column=col_index["Theme Rationale"], value=rationale)
+            sheet.set_by_index(row_num, "Theme", theme)
+            sheet.set_by_index(row_num, "Theme Rationale", rationale)
 
-        summary_ws = wb.create_sheet("Theme Summary")
-        summary_ws.append(["Theme", "Description", "Count", "Example Quote 1", "Example Quote 2"])
+        summary_rows = []
         for name in sorted(theme_counts, key=lambda n: -theme_counts[n]):
             desc = theme_descriptions.get(name, "Doesn't fit any of the discovered themes.")
             quotes = theme_quotes.get(name, [])
-            summary_ws.append([name, desc, theme_counts[name],
-                                quotes[0] if len(quotes) > 0 else "", quotes[1] if len(quotes) > 1 else ""])
+            summary_rows.append([name, desc, theme_counts[name],
+                                  quotes[0] if len(quotes) > 0 else "", quotes[1] if len(quotes) > 1 else ""])
 
-        out_buf = io.BytesIO()
-        wb.save(out_buf)
-        out_buf.seek(0)
+        if progress_cb:
+            progress_cb(0.99, "Writing output workbook...")
+        out_bytes = sheet.to_bytes(extra_sheets=[
+            ("Theme Summary", ["Theme", "Description", "Count", "Example Quote 1", "Example Quote 2"], summary_rows),
+        ])
 
         cost = usage_cost(usage_totals)
         theme_source_line = (
@@ -309,4 +307,4 @@ class ThemeSummaryModule(AnalysisModule):
             f"{usage_totals['cached_input']:,} cached + {usage_totals['output']:,} output tokens)",
             "See the 'Theme Summary' sheet for counts and example quotes per theme.",
         ]
-        return ModuleResult(output_bytes=out_buf.getvalue(), output_filename=filename, summary_lines=summary_lines)
+        return ModuleResult(output_bytes=out_bytes, output_filename=filename, summary_lines=summary_lines)

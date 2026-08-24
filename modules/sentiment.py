@@ -254,11 +254,11 @@ class SentimentModule(LLMEnrichmentModule):
                 out[r_col] = ""
         return out
 
-    def build_extra_sheets(self, wb, params, row_values):
+    def build_extra_sheets(self, params, row_values):
         if self._is_multi(params):
             entity_names = self._all_entity_names(params)
             if not entity_names:
-                return
+                return []
             counts = {name: {"Positive": 0, "Negative": 0, "Neutral": 0, "Not Mentioned": 0} for name in entity_names}
             long_rows = []
             for row_num, row, values in row_values:
@@ -271,19 +271,20 @@ class SentimentModule(LLMEnrichmentModule):
                     if sentiment in ("Positive", "Negative", "Neutral"):
                         long_rows.append((url, name, sentiment, values.get(r_col, "")))
 
-            breakdown_ws = wb.create_sheet("Sentiment Breakdown")
-            breakdown_ws.append(["Entity", "Positive", "Negative", "Neutral", "Not Mentioned",
-                                  "Total Assessed", "Net Sentiment"])
+            breakdown_rows = []
             for name in entity_names:
                 c = counts[name]
                 total = c["Positive"] + c["Negative"] + c["Neutral"]
                 net = round((c["Positive"] - c["Negative"]) / total, 3) if total else ""
-                breakdown_ws.append([name, c["Positive"], c["Negative"], c["Neutral"], c["Not Mentioned"], total, net])
+                breakdown_rows.append([name, c["Positive"], c["Negative"], c["Neutral"], c["Not Mentioned"], total, net])
 
-            long_ws = wb.create_sheet("Sentiment Long")
-            long_ws.append(["Url", "Entity", "Sentiment", "Rationale"])
-            for url, name, sentiment, rationale in long_rows:
-                long_ws.append([url, name, sentiment, rationale])
+            return [
+                ("Sentiment Breakdown",
+                 ["Entity", "Positive", "Negative", "Neutral", "Not Mentioned", "Total Assessed", "Net Sentiment"],
+                 breakdown_rows),
+                ("Sentiment Long", ["Url", "Entity", "Sentiment", "Rationale"],
+                 [[url, name, sentiment, rationale] for url, name, sentiment, rationale in long_rows]),
+            ]
         else:
             counts = {"Positive": 0, "Negative": 0, "Neutral": 0}
             for row_num, row, values in row_values:
@@ -292,9 +293,10 @@ class SentimentModule(LLMEnrichmentModule):
                     counts[s] += 1
             total = sum(counts.values())
             net = round((counts["Positive"] - counts["Negative"]) / total, 3) if total else ""
-            breakdown_ws = wb.create_sheet("Sentiment Breakdown")
-            breakdown_ws.append(["Positive", "Negative", "Neutral", "Total", "Net Sentiment"])
-            breakdown_ws.append([counts["Positive"], counts["Negative"], counts["Neutral"], total, net])
+            return [
+                ("Sentiment Breakdown", ["Positive", "Negative", "Neutral", "Total", "Net Sentiment"],
+                 [[counts["Positive"], counts["Negative"], counts["Neutral"], total, net]]),
+            ]
 
     def estimate_tokens_per_row(self, parsed, params, context):
         system_tokens = rough_token_estimate(self.system_prompt_fragment(params)) + 40

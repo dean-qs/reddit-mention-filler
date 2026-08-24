@@ -26,6 +26,15 @@ from modules.registry import MODULES
 st.set_page_config(page_title="QS Reddit Mention Filler", page_icon="🧵", layout="centered")
 require_quadstrat_email(st)
 
+
+@st.cache_data(show_spinner="Reading file...")
+def _cached_parse_export(file_bytes, filename):
+    # Streamlit reruns this whole script on every widget interaction (a
+    # checkbox, a slider drag) — without caching, a large file (tens of
+    # thousands of rows) would get fully re-read on every single one of
+    # those, not just on upload.
+    return parse_export(file_bytes, filename)
+
 st.title("🧵 QS Reddit Mention Filler")
 st.caption("Team Digital")
 st.write(
@@ -84,7 +93,7 @@ else:
 parsed = None
 if file_bytes is not None:
     try:
-        parsed = parse_export(file_bytes, filename)
+        parsed = _cached_parse_export(file_bytes, filename)
     except BadExport as e:
         st.error(str(e))
 
@@ -193,7 +202,7 @@ if parsed is not None:
                         )
                         all_summary.append((" + ".join(m.label for m in batch), lines))
                     else:
-                        current_parsed = parse_export(current_bytes, current_filename) if current_bytes is not file_bytes else parsed
+                        current_parsed = _cached_parse_export(current_bytes, current_filename) if current_bytes is not file_bytes else parsed
 
                         def module_progress_cb(frac, message, _mod=mod):
                             progress_bar.progress(min(1.0, max(0.0, frac)))

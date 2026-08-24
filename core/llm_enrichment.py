@@ -22,12 +22,11 @@ calls (thread pool, exponential backoff, running cost tally from real token
 usage) — see the llm-bulk-api skill for the general pattern this mirrors.
 """
 import concurrent.futures
-import io
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
 from core.llm_client import call_json, get_client
 from core.llm_cost import PRICE_PER_1M_CACHED_INPUT, PRICE_PER_1M_INPUT, PRICE_PER_1M_OUTPUT  # noqa: F401 (re-exported)
-from core.mentions_io import BadExport, ensure_columns, iter_data_rows, load_sheet_for_enrichment
+from core.mentions_io import BadExport, load_sheet_for_enrichment
 from core.text_utils import looks_unfilled
 
 MAX_WORKERS = 20
@@ -95,17 +94,17 @@ def run_llm_modules(modules, params_by_key, file_bytes, filename, progress_cb=No
     call per eligible row, writes all their output columns into the same
     workbook, and returns (output_bytes, output_filename, cost_summary).
     """
-    wb, ws, header_row_1based, col_index = load_sheet_for_enrichment(file_bytes)
+    sheet = load_sheet_for_enrichment(file_bytes)
 
     new_cols = []
     for mod in modules:
         new_cols += mod.output_columns(params_by_key[mod.key])
-    col_index = ensure_columns(ws, header_row_1based, col_index, new_cols)
+    sheet.ensure_columns(new_cols)
 
-    if "Full Text" not in col_index:
+    if "Full Text" not in sheet.col_index:
         raise BadExport("No 'Full Text' column found — run Mention Filler first, or upload an already-filled export.")
 
-    all_rows = list(iter_data_rows(ws, header_row_1based, col_index))
+    all_rows = list(sheet.iter_rows())
     eligible = [(row_num, row) for row_num, row in all_rows if not looks_unfilled(row.get("Full Text"))]
     skipped_unfilled = len(all_rows) - len(eligible)
 
@@ -195,19 +194,20 @@ def run_llm_modules(modules, params_by_key, file_bytes, filename, progress_cb=No
         else:
             values = {c: "" for mod in modules for c in mod.output_columns(params_by_key[mod.key])}
         for c, v in values.items():
-            if c in col_index:
-                ws.cell(row=row_num, column=col_index[c], value=v)
+            if c in sheet.col_index:
+                sheet.set_by_index(row_num, c, v)
         all_values_by_row.append((row_num, row, values))
 
+    extra_sheets = []
     for mod in modules:
         own_cols = set(mod.output_columns(params_by_key[mod.key]))
         row_values = [(row_num, row, {c: v for c, v in values.items() if c in own_cols})
                       for row_num, row, values in all_values_by_row]
-        mod.build_extra_sheets(wb, params_by_key[mod.key], row_values)
+        extra_sheets.extend(mod.build_extra_sheets(params_by_key[mod.key], row_values) or [])
 
-    out_buf = io.BytesIO()
-    wb.save(out_buf)
-    out_buf.seek(0)
+    if progress_cb:
+        progress_cb(0.99, "Writing output workbook...")
+    out_bytes = sheet.to_bytes(extra_sheets=extra_sheets)
 
     cost = (
         usage_totals["input"] / 1_000_000 * PRICE_PER_1M_INPUT
@@ -218,4 +218,4 @@ def run_llm_modules(modules, params_by_key, file_bytes, filename, progress_cb=No
         **usage_totals, "cost_usd": cost, "n_rows": len(eligible), "n_failed": n_failed,
         "n_skipped": skipped_unfilled, "n_no_signal": len(no_signal_row_nums),
     }
-    return out_buf.getvalue(), filename, cost_summary
+    return out_bytes, filename, cost_summary

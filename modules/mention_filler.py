@@ -63,7 +63,9 @@ class MentionFillerModule(AnalysisModule):
                 progress_cb(done / total, f"Fetching {label} from archive: {done:,}/{total:,} ({found:,} found)")
 
         results = fetch_archive(parsed.urls, on_progress=on_progress)
-        out_buf, stats = fill_export(parsed, results, file_bytes=file_bytes)
+        if progress_cb:
+            progress_cb(0.99, "Writing filled workbook...")
+        out_buf, stats = fill_export(parsed, results)
 
         stem = Path(filename).stem
         out_name = f"{stem} - filled.xlsx"
