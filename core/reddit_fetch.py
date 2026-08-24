@@ -1,11 +1,21 @@
 """Bulk-fetch Reddit comment/post text from the Arctic Shift archive.
 
-Pure-Python port of reddit_archive_grabber.js — same batching, retry/backoff,
-and bisect-on-persistent-failure behavior, no Node/browser involved. This is
-the free, keyless, ~1,400-URL/minute path that covers the large majority of
-any Bulk Mentions export (per the original README, archive misses are
-typically 0-2 per 1,000 URLs).
+Pure-Python port of reddit_archive_grabber.js's batching and retry/backoff
+behavior, no Node/browser involved — but fetched CONCURRENTLY (a bounded
+thread pool) instead of one 100-id chunk at a time with a blocking sleep
+between each. The original sequential version is safe in a terminal script
+(no time limit on how long a CLI run takes), but on a Streamlit-hosted app a
+large export's fetch could run for 20-30+ minutes of continuous sequential
+HTTP calls tied to one browser session — long enough for a laptop sleep,
+network blip, or the platform's own session recycling to drop the
+connection mid-run, which reads to the user as "it finished but there's no
+download button" (the page just reloads to its pre-run state). Concurrency
+cuts that window to a couple of minutes for even a 70k+ row export. The
+per-chunk retry/backoff/bisect-on-failure behavior is unchanged; a bounded
+worker pool (not one request at a time) is the actual throttle now instead
+of a fixed inter-request sleep.
 """
+import concurrent.futures
 import re
 import time
 
@@ -13,7 +23,7 @@ import requests
 
 API = "https://arctic-shift.photon-reddit.com/api"
 BATCH = 100
-DELAY_S = 1.0
+FETCH_WORKERS = 8
 UA = "quadrant-reddit-mention-filler/1.0"
 
 _COMMENT_RE = re.compile(r"/comments/([a-z0-9]+)/[^/]+/([a-z0-9]+)$", re.I)
@@ -51,7 +61,11 @@ def _fetch_json(session, url, attempt=1):
     return resp.json()
 
 
-def _fetch_chunk(session, endpoint, chunk, found, on_log=None):
+def _fetch_chunk(session, endpoint, chunk, on_log=None):
+    """Fetch one chunk of ids, bisecting and retrying on failure. Returns a
+    dict local to this call — thread-safe by construction, no shared state
+    to lock, since callers merge each future's own dict after it completes."""
+    found = {}
     try:
         ids_param = ",".join(chunk)
         data = _fetch_json(session, f"{API}/{endpoint}/ids?ids={ids_param}")
@@ -62,24 +76,17 @@ def _fetch_chunk(session, endpoint, chunk, found, on_log=None):
         if len(chunk) == 1:
             if on_log:
                 on_log(f"  giving up on {chunk[0]}: {e}")
-            return
+            return found
         mid = -(-len(chunk) // 2)
         if on_log:
             on_log(f"  chunk of {len(chunk)} failed ({e}) — bisecting")
-        _fetch_chunk(session, endpoint, chunk[:mid], found, on_log)
-        time.sleep(DELAY_S)
-        _fetch_chunk(session, endpoint, chunk[mid:], found, on_log)
-
-
-def _bulk_fetch(session, endpoint, ids, label, on_progress=None, on_log=None):
-    found = {}
-    for i in range(0, len(ids), BATCH):
-        _fetch_chunk(session, endpoint, ids[i:i + BATCH], found, on_log)
-        if on_progress:
-            on_progress(label, min(i + BATCH, len(ids)), len(ids), len(found))
-        if i + BATCH < len(ids):
-            time.sleep(DELAY_S)
+        found.update(_fetch_chunk(session, endpoint, chunk[:mid], on_log))
+        found.update(_fetch_chunk(session, endpoint, chunk[mid:], on_log))
     return found
+
+
+def _chunks(ids):
+    return [ids[i:i + BATCH] for i in range(0, len(ids), BATCH)]
 
 
 def fetch_archive(urls, on_progress=None, on_log=None):
@@ -95,9 +102,30 @@ def fetch_archive(urls, on_progress=None, on_log=None):
     title_ids = list(dict.fromkeys(x["postId"] for x in items if x["kind"] == "comment"))
     all_post_ids = list(dict.fromkeys(post_only_ids + title_ids))
 
+    comments, posts = {}, {}
+    dest = {"comments": comments, "posts": posts}
+    tasks = [("comments", c) for c in _chunks(comment_ids)] + [("posts", c) for c in _chunks(all_post_ids)]
+    total_ids = len(comment_ids) + len(all_post_ids)
+    done_total = 0
+
     with requests.Session() as session:
-        comments = _bulk_fetch(session, "comments", comment_ids, "comments", on_progress, on_log)
-        posts = _bulk_fetch(session, "posts", all_post_ids, "posts", on_progress, on_log)
+        adapter = requests.adapters.HTTPAdapter(pool_maxsize=FETCH_WORKERS)
+        session.mount("https://", adapter)
+        if tasks:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+                futures = {pool.submit(_fetch_chunk, session, endpoint, chunk, on_log): (endpoint, chunk)
+                           for endpoint, chunk in tasks}
+                for fut in concurrent.futures.as_completed(futures):
+                    endpoint, chunk = futures[fut]
+                    dest[endpoint].update(fut.result())
+                    done_total += len(chunk)
+                    if on_progress:
+                        # done/total are combined across comments+posts so the caller's
+                        # progress bar advances monotonically even though both endpoints'
+                        # chunks now complete interleaved, not one endpoint fully before
+                        # the other.
+                        on_progress(endpoint, min(done_total, total_ids), total_ids,
+                                     len(comments) + len(posts))
 
     results = []
     for it in items:

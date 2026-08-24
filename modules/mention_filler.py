@@ -19,7 +19,7 @@ from core.mentions_io import fill_export, unmatched_csv_bytes
 from core.reddit_fetch import fetch_archive
 from .base import AnalysisModule, Estimate, ModuleResult
 
-ARCHIVE_RATE_PER_MIN = 1400  # matches the original pipeline's measured Arctic Shift throughput
+ARCHIVE_RATE_PER_MIN = 12000  # conservative floor under the ~20-30k/min measured with core.reddit_fetch's concurrent fetch
 
 
 def _fmt_duration(seconds):
