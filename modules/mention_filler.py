@@ -20,6 +20,7 @@ from core.reddit_fetch import fetch_archive
 from .base import AnalysisModule, Estimate, ModuleResult
 
 ARCHIVE_RATE_PER_MIN = 12000  # conservative floor under the ~20-30k/min measured with core.reddit_fetch's concurrent fetch
+STREAM_ROWS_PER_SEC = 1000  # conservative floor under the ~1,230 rows/sec measured for the large-file streaming write pass
 
 
 def _fmt_duration(seconds):
@@ -42,17 +43,26 @@ class MentionFillerModule(AnalysisModule):
     def estimate(self, parsed, params, context) -> Estimate:
         n = len(parsed.urls)
         est_seconds = (n / ARCHIVE_RATE_PER_MIN) * 60
+        lines = [
+            f"Estimated fetch time: {_fmt_duration(est_seconds)} "
+            f"(Arctic Shift archive — free, no API key, ~{ARCHIVE_RATE_PER_MIN:,} URLs/min)",
+            "No paid APIs are used by this module — estimated cost: $0.",
+            "URLs the archive doesn't have (typically well under 1%) will be listed in a "
+            "downloadable 'unmatched.csv' rather than live-scraped — see the README for why.",
+            "Non-Reddit URLs (mixed-source exports) are left completely untouched — their "
+            "existing Full Text/Date/Author pass through as-is.",
+        ]
+        if getattr(parsed, "is_streaming", False):
+            stream_seconds = n / STREAM_ROWS_PER_SEC
+            est_seconds += stream_seconds
+            lines.append(
+                f"This file is large enough to trigger a slower, memory-safe processing mode "
+                f"(adds ~{_fmt_duration(stream_seconds)} to write the result) instead of the normal "
+                f"fast path, so the run stays well under the hosted app's memory limit."
+            )
         return Estimate(
             headline=f"{n:,} mention URLs found",
-            lines=[
-                f"Estimated fetch time: {_fmt_duration(est_seconds)} "
-                f"(Arctic Shift archive — free, no API key, ~{ARCHIVE_RATE_PER_MIN:,} URLs/min)",
-                "No paid APIs are used by this module — estimated cost: $0.",
-                "URLs the archive doesn't have (typically well under 1%) will be listed in a "
-                "downloadable 'unmatched.csv' rather than live-scraped — see the README for why.",
-                "Non-Reddit URLs (mixed-source exports) are left completely untouched — their "
-                "existing Full Text/Date/Author pass through as-is.",
-            ],
+            lines=lines,
             est_seconds=est_seconds,
             est_cost_usd=0.0,
         )
@@ -65,7 +75,7 @@ class MentionFillerModule(AnalysisModule):
         results = fetch_archive(parsed.urls, on_progress=on_progress)
         if progress_cb:
             progress_cb(0.99, "Writing filled workbook...")
-        out_buf, stats = fill_export(parsed, results)
+        out_buf, stats = fill_export(parsed, results, file_bytes=file_bytes)
 
         stem = Path(filename).stem
         out_name = f"{stem} - filled.xlsx"
