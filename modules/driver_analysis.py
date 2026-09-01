@@ -22,6 +22,7 @@ Plain AnalysisModule (like Theme Summary) — multi-phase and entity-scoped,
 doesn't fit the shared per-row LLMEnrichmentModule coordinator.
 """
 import concurrent.futures
+import datetime
 import random
 
 from core.cost_caps import CostCapExceeded, max_rows_per_run
@@ -75,6 +76,11 @@ THEME_SHEET_COLS = [
     "Example Negative Url",
 ]
 
+MONTHLY_SHEET_COLS = [
+    "Entity", "Theme", "Month", "Positive", "Negative", "Neutral", "Volume", "Net Sentiment",
+    "Net Sentiment vs Prior Month", "Volume % Change vs Prior Month",
+]
+
 
 def _tag_schema(theme_names):
     return {
@@ -122,6 +128,22 @@ def _summary_schema():
     }
 
 
+def _month_key(date_val):
+    """"YYYY-MM" for a row's Date value, or None if it can't be determined.
+    Mention Filler's own output always writes real datetime cells, but this
+    stays lenient about ISO-formatted date strings too (e.g. a file whose
+    Date column was touched by another tool, or a CSV round-trip) since
+    those are a plausible real input, not just an implementation detail."""
+    if isinstance(date_val, (datetime.date, datetime.datetime)):
+        return date_val.strftime("%Y-%m")
+    if isinstance(date_val, str) and date_val:
+        try:
+            return datetime.date.fromisoformat(date_val[:10]).strftime("%Y-%m")
+        except ValueError:
+            return None
+    return None
+
+
 def _filter_relevant(all_rows, entity_name):
     col = f"LLM Sentiment: {entity_name}"
     return [(row_num, row) for row_num, row in all_rows if row.get(col) in REAL_SENTIMENTS]
@@ -155,9 +177,10 @@ def _generate_summary(client, label, theme_rows, usage_totals):
 
 
 def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usage_totals, progress_cb):
-    """units: list of (unit_key, row). Returns (theme_rows, summary_text, n_tagged, n_failed)."""
+    """units: list of (unit_key, row). Returns (theme_rows, monthly_rows,
+    summary_text, n_tagged, n_failed, n_no_date)."""
     if not units:
-        return [], f"No mentions found for {label}.", 0, 0
+        return [], [], f"No mentions found for {label}.", 0, 0, 0
 
     if progress_cb:
         progress_cb(0.0, f"{label}: discovering themes from a sample...")
@@ -211,17 +234,32 @@ def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usag
 
     counts = {name: {"Positive": 0, "Negative": 0, "Neutral": 0} for name in theme_names}
     quotes = {name: {"Positive": None, "Negative": None} for name in theme_names}
+    # (theme, "YYYY-MM") -> counts, accumulated from the same tag results
+    # above — no extra LLM calls needed for the monthly breakdown.
+    monthly_counts = {}
+    no_date_unit_keys = set()
     for unit_key, row in units:
         result = results.get(unit_key)
         if not result:
             continue
-        for tag in result.get("themes", []):
+        tags = result.get("themes", [])
+        if not tags:
+            continue
+        month_key = _month_key(row.get("Date"))
+        if month_key is None:
+            no_date_unit_keys.add(unit_key)
+        for tag in tags:
             name, sentiment = tag.get("name"), tag.get("sentiment")
             if name not in counts or sentiment not in REAL_SENTIMENTS:
                 continue
             counts[name][sentiment] += 1
             if sentiment in ("Positive", "Negative") and quotes[name][sentiment] is None:
                 quotes[name][sentiment] = (str(row.get("Full Text") or "")[:250], row.get("Url", ""))
+            if month_key:
+                monthly_key = (name, month_key)
+                if monthly_key not in monthly_counts:
+                    monthly_counts[monthly_key] = {"Positive": 0, "Negative": 0, "Neutral": 0}
+                monthly_counts[monthly_key][sentiment] += 1
 
     theme_rows = []
     for name in theme_names:
@@ -248,8 +286,27 @@ def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usag
         })
     theme_rows.sort(key=lambda r: -(r["Net Sentiment"] if isinstance(r["Net Sentiment"], (int, float)) else 0))
 
+    monthly_rows = []
+    for name in theme_names:
+        months_for_theme = sorted(m for (n, m) in monthly_counts if n == name)
+        prev_net, prev_volume = None, None
+        for month in months_for_theme:
+            c = monthly_counts[(name, month)]
+            total = c["Positive"] + c["Negative"] + c["Neutral"]
+            net = round((c["Positive"] - c["Negative"]) / total, 3) if total else None
+            net_change = round(net - prev_net, 3) if (net is not None and prev_net is not None) else ""
+            vol_change = round((total - prev_volume) / prev_volume * 100, 1) if prev_volume else ""
+            monthly_rows.append({
+                "Entity": label, "Theme": name, "Month": month,
+                "Positive": c["Positive"], "Negative": c["Negative"], "Neutral": c["Neutral"],
+                "Volume": total, "Net Sentiment": net if net is not None else "",
+                "Net Sentiment vs Prior Month": net_change,
+                "Volume % Change vs Prior Month": vol_change,
+            })
+            prev_net, prev_volume = net, total
+
     summary_text = _generate_summary(client, label, theme_rows, usage_totals)
-    return theme_rows, summary_text, len(units) - n_failed, n_failed
+    return theme_rows, monthly_rows, summary_text, len(units) - n_failed, n_failed, len(no_date_unit_keys)
 
 
 class DriverAnalysisModule(AnalysisModule):
@@ -380,19 +437,23 @@ class DriverAnalysisModule(AnalysisModule):
         client = get_client()
 
         theme_sheet_rows = []
+        monthly_sheet_rows = []
         summary_sheet_rows = []
         bucket_summaries = []
+        total_no_date = 0
         n_buckets = len(buckets)
         for i, (label, units) in enumerate(buckets):
             def bucket_progress_cb(frac, message, _i=i):
                 if progress_cb:
                     progress_cb((_i + frac) / n_buckets, message)
 
-            theme_rows, summary_text, n_tagged, n_failed = _analyze_bucket(
+            theme_rows, monthly_rows, summary_text, n_tagged, n_failed, n_no_date = _analyze_bucket(
                 client, label, units, params["n_themes"], params["sample_size"], params["threshold"],
                 usage_totals, bucket_progress_cb,
             )
             theme_sheet_rows.extend(theme_rows)
+            monthly_sheet_rows.extend(monthly_rows)
+            total_no_date += n_no_date
             summary_sheet_rows.append((label, summary_text))
             bucket_summaries.append(
                 f"{label}: {len(units):,} mentions, {len(theme_rows)} themes"
@@ -401,18 +462,23 @@ class DriverAnalysisModule(AnalysisModule):
 
         theme_rows_out = [[r[c] for c in THEME_SHEET_COLS] for r in theme_sheet_rows]
         summary_rows_out = [[entity, summary_text] for entity, summary_text in summary_sheet_rows]
+        monthly_rows_out = [[r[c] for c in MONTHLY_SHEET_COLS] for r in monthly_sheet_rows]
         if progress_cb:
             progress_cb(0.99, "Writing output workbook...")
         out_bytes = sheet.to_bytes(extra_sheets=[
             ("Driver Analysis", THEME_SHEET_COLS, theme_rows_out),
             ("Driver Analysis Summary", ["Entity", "Summary"], summary_rows_out),
+            ("Driver Analysis Monthly", MONTHLY_SHEET_COLS, monthly_rows_out),
         ])
 
         cost = usage_cost(usage_totals)
         summary_lines = bucket_summaries + [
             f"Actual cost: ${cost:,.4f} ({usage_totals['input']:,} input + {usage_totals['cached_input']:,} "
             f"cached + {usage_totals['output']:,} output tokens)",
-            "See the 'Driver Analysis' sheet for the full theme breakdown and 'Driver Analysis Summary' "
-            "for a narrative per brand.",
+            "See the 'Driver Analysis' sheet for the full theme breakdown, 'Driver Analysis Summary' "
+            "for a narrative per brand, and 'Driver Analysis Monthly' for month-over-month trends.",
         ]
+        if total_no_date:
+            summary_lines.insert(-1, f"{total_no_date:,} tagged mentions lacked a valid Date and were "
+                                       f"excluded from the monthly breakdown (still counted in the other sheets).")
         return ModuleResult(output_bytes=out_bytes, output_filename=filename, summary_lines=summary_lines)

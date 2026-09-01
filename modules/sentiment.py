@@ -26,16 +26,29 @@ from .base import Estimate, LLMEnrichmentModule
 
 MAX_CHARS = 4000  # bounds worst-case per-row cost on unusually long comments
 
+# Shared calibration clause: a forced 3-way choice at temperature 0 tends to
+# default to a side rather than Neutral even for mild/mixed/informational
+# mentions. Spelled out explicitly in every mode's prompt (General, single
+# entity, multi-entity) so Neutral isn't systematically under-used relative
+# to what a human coder would call it.
+NEUTRAL_CALIBRATION = (
+    "Default to Neutral unless the sentiment is clearly and unambiguously "
+    "one-sided — purely informational or transactional mentions, and "
+    "mentions that mix praise and criticism, should be Neutral rather than "
+    "forced to Positive or Negative. Reserve Positive/Negative for mentions "
+    "where the tone is genuinely, predominantly one-sided."
+)
+
 GENERAL_PROMPT = (
     "Classify the overall sentiment expressed in the mention below as Positive, "
     "Neutral, or Negative. Judge the tone of the mention itself, not the "
-    "subject matter it discusses."
+    "subject matter it discusses. " + NEUTRAL_CALIBRATION
 )
 
 ENTITY_PROMPT_TEMPLATE = (
     "Classify the sentiment expressed toward {entity} specifically — not the "
     "mention's overall tone. If {entity} is not actually mentioned or the "
-    "mention is neutral/off-topic with respect to it, use Neutral."
+    "mention is neutral/off-topic with respect to it, use Neutral. " + NEUTRAL_CALIBRATION
 )
 
 SINGLE_OUTPUT_INSTRUCTIONS = (
@@ -53,7 +66,7 @@ MULTI_ENTITY_INSTRUCTIONS = (
     "another. If an entity turns out not to genuinely be referenced (e.g. the "
     "keyword search matched \"discord\" meaning disagreement, not the platform), "
     "classify it Neutral rather than force Positive/Negative — the field is still "
-    "required for every entity you're asked about.\n\n"
+    "required for every entity you're asked about. " + NEUTRAL_CALIBRATION + "\n\n"
     "For each entity you're asked about (named EXACTLY as given), respond with two "
     "fields: 'LLM Sentiment: <entity name>' (Positive/Neutral/Negative) and "
     "'LLM Sentiment Rationale: <entity name>' (a short clause, under 15 words)."

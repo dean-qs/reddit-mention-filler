@@ -19,7 +19,7 @@ from core.access_gate import require_quadstrat_email
 from core.cost_caps import CostCapExceeded, max_cost_usd_per_run
 from core.llm_client import MissingApiKey
 from core.llm_enrichment import run_llm_modules
-from core.mentions_io import BadExport, parse_export
+from core.mentions_io import BadExport, merge_exports, parse_export
 from modules.base import LLMEnrichmentModule
 from modules.registry import MODULES
 
@@ -34,6 +34,11 @@ def _cached_parse_export(file_bytes, filename):
     # thousands of rows) would get fully re-read on every single one of
     # those, not just on upload.
     return parse_export(file_bytes, filename)
+
+
+@st.cache_data(show_spinner="Merging files...")
+def _cached_merge_exports(files):
+    return merge_exports(files)
 
 st.title("🧵 QS Reddit Mention Filler")
 st.caption("Team Digital")
@@ -76,10 +81,27 @@ file_bytes = None
 filename = None
 
 if input_mode == "Upload a file":
-    uploaded = st.file_uploader("Bulk Mentions export (.xlsx or .csv)", type=["xlsx", "csv"])
-    if uploaded is not None:
-        file_bytes = uploaded.getvalue()
-        filename = uploaded.name
+    uploaded = st.file_uploader(
+        "Bulk Mentions export (.xlsx or .csv) — upload more than one to concatenate + dedupe by Url",
+        type=["xlsx", "csv"], accept_multiple_files=True,
+    )
+    if uploaded:
+        if len(uploaded) == 1:
+            file_bytes = uploaded[0].getvalue()
+            filename = uploaded[0].name
+        else:
+            files = [(f.getvalue(), f.name) for f in uploaded]
+            try:
+                file_bytes, merge_stats = _cached_merge_exports(files)
+                filename = f"{merge_stats['n_files']} files merged.xlsx"
+                per_file = ", ".join(f"{name}: {n:,} rows" for name, n in merge_stats["per_file_counts"])
+                st.info(
+                    f"Merged {merge_stats['n_files']} files ({per_file}) into "
+                    f"{merge_stats['n_merged_rows']:,} rows — {merge_stats['n_duplicates']:,} duplicate "
+                    f"Urls dropped (first occurrence kept)."
+                )
+            except BadExport as e:
+                st.error(str(e))
 else:
     pasted = st.text_area(
         "Paste the export's raw CSV text (including its header row)",
@@ -163,6 +185,19 @@ if parsed is not None:
         # -------------------------------------------------------------
         st.divider()
         st.header("4. Run")
+
+        # The whole results section (below) used to live inside this `if
+        # st.button("Run"):` block, which is only True on the exact script
+        # run where Run was clicked — any later rerun (including the
+        # download button's OWN click) re-runs with that False again, so
+        # the results and the download button itself would vanish. Stash
+        # the result in session_state and render it from there instead, so
+        # it survives reruns. source_key clears it out when the upload
+        # changes, so a stale download doesn't linger next to a new file.
+        current_source_key = (filename, len(file_bytes) if file_bytes else None)
+        if st.session_state.get("run_result", {}).get("source_key") != current_source_key:
+            st.session_state.pop("run_result", None)
+
         if st.button("Run", type="primary", disabled=cap_exceeded):
             current_bytes, current_filename = file_bytes, filename
             all_summary = []
@@ -229,8 +264,18 @@ if parsed is not None:
             progress_bar.progress(1.0)
             status_text.write("Done.")
 
+            st.session_state["run_result"] = {
+                "bytes": current_bytes,
+                "filename": current_filename,
+                "summary": all_summary,
+                "extra_files": all_extra_files,
+                "source_key": current_source_key,
+            }
+
+        run_result = st.session_state.get("run_result")
+        if run_result:
             st.success("Finished — see results below.")
-            for label, lines in all_summary:
+            for label, lines in run_result["summary"]:
                 with st.container(border=True):
                     st.write(f"**{label}**")
                     for line in lines:
@@ -238,11 +283,15 @@ if parsed is not None:
 
             st.download_button(
                 "⬇️ Download workbook",
-                data=current_bytes,
-                file_name=current_filename,
+                data=run_result["bytes"],
+                file_name=run_result["filename"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_main",
             )
-            for extra_name, extra_bytes in all_extra_files.items():
-                st.download_button(f"⬇️ Download {extra_name}", data=extra_bytes, file_name=extra_name, mime="text/csv")
+            for extra_name, extra_bytes in run_result["extra_files"].items():
+                st.download_button(
+                    f"⬇️ Download {extra_name}", data=extra_bytes, file_name=extra_name, mime="text/csv",
+                    key=f"download_{extra_name}",
+                )
     else:
         st.info("Pick at least one module above to see an estimate and run it.")

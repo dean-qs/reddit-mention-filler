@@ -273,6 +273,82 @@ def parse_export(file_bytes, filename):
     return ParsedExport(is_csv, urls, preamble=preamble, header=header, data_rows=data_rows, cols=cols)
 
 
+def merge_exports(files):
+    """Merge several uploaded Bulk Mentions exports into one, deduping by
+    Url (first occurrence wins) so the rest of the pipeline — Mention
+    Filler's streaming logic, every enrichment module — only ever sees a
+    single file, exactly like today.
+
+    files: list of (file_bytes, filename), in upload order.
+    Returns (merged_file_bytes, stats) where merged_file_bytes is a real
+    xlsx built through the same _write_workbook_bytes every other output
+    goes through, and stats = {"n_files", "per_file_counts", "n_duplicates",
+    "n_merged_rows"}.
+
+    Every file must have byte-identical column headers — deliberately a
+    hard error rather than a silent column union, since misaligned columns
+    between differently-shaped exports would corrupt data quietly.
+
+    Reads each file fully via the plain (non-streaming) reader regardless
+    of size: deduping requires every row resident in memory to check
+    against the seen-Url set no matter which reader produced it, so there's
+    no streaming benefit to preserve here. An individually huge file should
+    still be run through Mention Filler on its own first — this is a
+    documented limitation, not an oversight.
+    """
+    if not files:
+        raise BadExport("No files provided to merge.")
+    if len(files) == 1:
+        raise BadExport("merge_exports expects more than one file — pass a single file straight to parse_export.")
+
+    first_header = first_preamble = first_cols = None
+    per_file_rows = []
+    per_file_counts = []
+    for file_bytes, filename in files:
+        is_csv = filename.lower().endswith(".csv")
+        rows = _read_csv_rows(file_bytes) if is_csv else _read_xlsx_rows(file_bytes)
+        hdr_i, cols = locate_header(rows)
+        preamble, header, data_rows = rows[:hdr_i], rows[hdr_i], rows[hdr_i + 1:]
+        header = [c if c is not None else "" for c in header]
+        data_rows = [list(row) for row in data_rows]
+
+        if first_header is None:
+            first_header, first_preamble, first_cols = header, preamble, cols
+        elif header != first_header:
+            raise BadExport(
+                f"'{filename}' has different columns than the first uploaded file — every file "
+                f"must have identical headers to be merged. First file: {len(first_header)} columns; "
+                f"'{filename}': {len(header)} columns."
+            )
+        per_file_rows.append((filename, data_rows))
+        per_file_counts.append((filename, len(data_rows)))
+
+    i_url = first_cols["Url"]
+    seen = set()
+    merged_rows = []
+    n_duplicates = 0
+    for filename, data_rows in per_file_rows:
+        for row in data_rows:
+            url = str(row[i_url]).strip() if len(row) > i_url and row[i_url] else ""
+            key = norm(url) if url else None
+            if key and key in seen:
+                n_duplicates += 1
+                continue
+            if key:
+                seen.add(key)
+            merged_rows.append(row)
+
+    main_rows = list(first_preamble) + [first_header] + merged_rows
+    merged_bytes = _write_workbook_bytes(main_rows)
+    stats = {
+        "n_files": len(files),
+        "per_file_counts": per_file_counts,
+        "n_duplicates": n_duplicates,
+        "n_merged_rows": len(merged_rows),
+    }
+    return merged_bytes, stats
+
+
 def read_header(file_bytes, filename):
     """Return the full header row (every column name, not just the required
     5) of a Bulk Mentions export — csv or xlsx, filled or not. Used to
