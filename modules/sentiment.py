@@ -56,18 +56,36 @@ SINGLE_OUTPUT_INSTRUCTIONS = (
     "Also give 'LLM Sentiment Rationale': a short clause (under 15 words) explaining why."
 )
 
-MULTI_ENTITY_INSTRUCTIONS = (
+# Multiple Entities' system prompt is built from three parts: a fixed
+# structural PREFIX (tells the model about the "Entities to assess" input
+# convention — plumbing this app needs regardless of topic), a swappable
+# TOPIC (what "sentiment" actually means for this run — the generic default
+# below, or a project's own detailed rules/examples pasted in via
+# render_options' "Custom topic instructions" box, e.g. to keep a new run
+# consistent with a specific prior coding scheme), and a fixed structural
+# SUFFIX (the per-entity JSON field-naming convention — also plumbing, not
+# topic). A custom topic REPLACES the default topic entirely, including
+# NEUTRAL_CALIBRATION — a project with its own calibration rules (e.g.
+# "avoid Neutral unless clearest option by far") would conflict with it.
+MULTI_ENTITY_STRUCTURE_PREFIX = (
     "This mention may reference more than one entity. Each row's input lists which "
     "entities to assess THIS mention under 'Entities to assess' (found via a "
     "recall-biased keyword/category search — it over-matches on purpose, so verify "
-    "against the actual text). For each one, classify sentiment expressed TOWARD "
-    "THAT ENTITY specifically, not the mention's overall tone: Positive, Neutral, or "
-    "Negative. A mention can be Positive toward one entity and Negative toward "
-    "another. If an entity turns out not to genuinely be referenced (e.g. the "
-    "keyword search matched \"discord\" meaning disagreement, not the platform), "
-    "classify it Neutral rather than force Positive/Negative — the field is still "
-    "required for every entity you're asked about. " + NEUTRAL_CALIBRATION + "\n\n"
-    "For each entity you're asked about (named EXACTLY as given), respond with two "
+    "against the actual text). "
+)
+
+DEFAULT_MULTI_ENTITY_TOPIC = (
+    "For each one, classify sentiment expressed TOWARD THAT ENTITY specifically, not the "
+    "mention's overall tone: Positive, Neutral, or Negative. A mention can be Positive "
+    "toward one entity and Negative toward another. If an entity turns out not to "
+    "genuinely be referenced (e.g. the keyword search matched \"discord\" meaning "
+    "disagreement, not the platform), classify it Neutral rather than force "
+    "Positive/Negative — the field is still required for every entity you're asked about. "
+    + NEUTRAL_CALIBRATION
+)
+
+MULTI_ENTITY_STRUCTURE_SUFFIX = (
+    "\n\nFor each entity you're asked about (named EXACTLY as given), respond with two "
     "fields: 'LLM Sentiment: <entity name>' (Positive/Neutral/Negative) and "
     "'LLM Sentiment Rationale: <entity name>' (a short clause, under 15 words)."
 )
@@ -86,7 +104,8 @@ class SentimentModule(LLMEnrichmentModule):
             key=f"{key_prefix}_mode",
         )
         params = {"mode": mode, "entity": "", "custom_prompt": "",
-                  "multi_source": "aliases", "entity_names": [], "category_name": "", "category_roster": {}}
+                  "multi_source": "aliases", "entity_names": [], "category_name": "", "category_roster": {},
+                  "multi_custom_topic": ""}
 
         if mode == "Toward a specific entity":
             entity = st.text_input(
@@ -156,11 +175,28 @@ class SentimentModule(LLMEnrichmentModule):
                     preview = ", ".join(f"{name} ({n:,})" for name, n in sorted(roster.items(), key=lambda kv: -kv[1]))
                     st.caption(f"{len(roster)} entities found: {preview}")
 
+            custom_topic = st.text_area(
+                "Custom topic instructions (optional)",
+                height=180,
+                key=f"{key_prefix}_multi_custom_topic",
+                placeholder="Leave blank for generic sentiment-toward-each-entity. Or paste a "
+                            "specific coding scheme — a narrower topic than overall sentiment, "
+                            "detailed classification rules, and/or illustrative examples — to keep "
+                            "this run consistent with a prior methodology. Replaces the generic "
+                            "instructions entirely (including this app's default Neutral-calibration "
+                            "guidance, in case your rules calibrate that differently on purpose).",
+                help="The per-entity output format (LLM Sentiment: <entity>, "
+                     "LLM Sentiment Rationale: <entity>) and the 'which entities does this row "
+                     "mention' detection are unaffected — this only replaces what 'sentiment' means.",
+            )
+            params["multi_custom_topic"] = custom_topic.strip()
+
         default_preview = GENERAL_PROMPT
         if mode == "Toward a specific entity":
             default_preview = ENTITY_PROMPT_TEMPLATE.format(entity=params["entity"] or "[entity]")
         elif mode == "Multiple entities":
-            default_preview = MULTI_ENTITY_INSTRUCTIONS
+            topic = params["multi_custom_topic"] or DEFAULT_MULTI_ENTITY_TOPIC
+            default_preview = MULTI_ENTITY_STRUCTURE_PREFIX + topic + MULTI_ENTITY_STRUCTURE_SUFFIX
 
         if mode == "Custom prompt":
             custom_prompt = st.text_area(
@@ -217,7 +253,8 @@ class SentimentModule(LLMEnrichmentModule):
 
     def system_prompt_fragment(self, params):
         if self._is_multi(params):
-            return MULTI_ENTITY_INSTRUCTIONS
+            topic = params.get("multi_custom_topic") or DEFAULT_MULTI_ENTITY_TOPIC
+            return MULTI_ENTITY_STRUCTURE_PREFIX + topic + MULTI_ENTITY_STRUCTURE_SUFFIX
         return self._single_instructions(params) + SINGLE_OUTPUT_INSTRUCTIONS
 
     def json_schema_fragment(self, row, params):
