@@ -12,3 +12,6 @@ work_*/
 *.xlsx
 *.csv
 .DS_Store
+
+# server-side run backups (core/run_storage.py) — ephemeral, per-container
+runs/

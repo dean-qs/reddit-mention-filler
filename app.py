@@ -20,6 +20,7 @@ from core.cost_caps import CostCapExceeded, max_cost_usd_per_run
 from core.llm_client import MissingApiKey
 from core.llm_enrichment import run_llm_modules
 from core.mentions_io import BadExport, merge_exports, parse_export
+import core.run_storage as run_storage
 from modules.base import LLMEnrichmentModule
 from modules.registry import MODULES
 
@@ -68,6 +69,37 @@ with st.expander("What is this / how does it work?"):
         "This tool can spend real OpenAI credits, so it's gated to Quadrant emails, and a "
         "row-count / cost cap in Secrets backstops accidental huge runs."
     )
+
+# Reads straight from disk on this container — not st.session_state — so it
+# still shows up after a dropped connection forces a brand-new browser
+# session (session_state resets then; this doesn't). Doesn't survive an app
+# reboot/redeploy though, so still download promptly — this is a rescue
+# path, not storage. See core/run_storage.py.
+recent_runs = run_storage.list_runs()
+if recent_runs:
+    with st.expander(
+        f"🗂️ Recent runs ({len(recent_runs)}) — backup downloads in case a download failed or "
+        f"the connection dropped. Not permanent — grab what you need soon."
+    ):
+        for run in recent_runs:
+            with st.container(border=True):
+                st.write(f"**{run['filename']}** — {run['saved_at']}")
+                for line in run.get("summary_lines", []):
+                    st.caption(f"- {line}")
+                main_bytes = run_storage.load_file(run["dir"], run["filename"])
+                if main_bytes:
+                    st.download_button(
+                        f"⬇️ Download {run['filename']}", data=main_bytes, file_name=run["filename"],
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"recent_{run['dir'].name}_main",
+                    )
+                for extra_name in run.get("extra_files", []):
+                    extra_bytes = run_storage.load_file(run["dir"], extra_name)
+                    if extra_bytes:
+                        st.download_button(
+                            f"⬇️ Download {extra_name}", data=extra_bytes, file_name=extra_name,
+                            mime="text/csv", key=f"recent_{run['dir'].name}_{extra_name}",
+                        )
 
 st.divider()
 
@@ -205,6 +237,24 @@ if parsed is not None:
             progress_bar = st.progress(0.0)
             status_text = st.empty()
 
+            # One id for this whole Run click — every checkpoint below writes
+            # into the SAME on-disk run directory (overwriting the previous
+            # module's snapshot), so if the connection drops mid-pipeline,
+            # whatever finished before that point is still recoverable from
+            # the "Recent runs" section on a fresh page load, not just a
+            # fully-successful run. Best-effort: a storage hiccup must never
+            # break the actual run, so every call is wrapped and swallowed.
+            run_id = run_storage.new_run_id()
+
+            def checkpoint():
+                try:
+                    run_storage.save_run(
+                        run_id, current_filename, current_bytes, all_extra_files,
+                        [line for _, lines in all_summary for line in lines],
+                    )
+                except Exception:
+                    pass
+
             try:
                 i = 0
                 while i < len(selected):
@@ -236,6 +286,7 @@ if parsed is not None:
                             f"{cost_summary['output']:,} output tokens)"
                         )
                         all_summary.append((" + ".join(m.label for m in batch), lines))
+                        checkpoint()
                     else:
                         current_parsed = _cached_parse_export(current_bytes, current_filename) if current_bytes is not file_bytes else parsed
 
@@ -247,6 +298,7 @@ if parsed is not None:
                         current_bytes, current_filename = result.output_bytes, result.output_filename
                         all_summary.append((mod.label, result.summary_lines))
                         all_extra_files.update(result.extra_files)
+                        checkpoint()
                         i += 1
             except MissingApiKey as e:
                 st.error(str(e))
@@ -259,6 +311,11 @@ if parsed is not None:
                 st.stop()
             except Exception as e:
                 st.error(f"The run failed: {e}")
+                if all_summary:
+                    st.caption(
+                        "Whatever finished before this failure was checkpointed — reload the page and "
+                        "check '🗂️ Recent runs' near the top to recover it."
+                    )
                 st.stop()
 
             progress_bar.progress(1.0)
