@@ -26,17 +26,23 @@ from .base import Estimate, LLMEnrichmentModule
 
 MAX_CHARS = 4000  # bounds worst-case per-row cost on unusually long comments
 
-# Shared calibration clause: a forced 3-way choice at temperature 0 tends to
-# default to a side rather than Neutral even for mild/mixed/informational
-# mentions. Spelled out explicitly in every mode's prompt (General, single
-# entity, multi-entity) so Neutral isn't systematically under-used relative
-# to what a human coder would call it.
+# Shared calibration clause. An earlier, more absolutist version of this
+# ("default to Neutral unless clearly and unambiguously one-sided") measured
+# on a real 9-brand dataset (see git history) came in at 67-96% Neutral
+# across every entity — implausible for genuine opinion data, and wildly
+# inconsistent with Driver Analysis's separate per-theme sentiment call
+# (13-31% Neutral on the identical mentions, unaffected by this clause).
+# This version aims for the middle: most real opinion should get a real
+# label; Neutral is for content that's genuinely uninformative about
+# sentiment, not just moderate in tone.
 NEUTRAL_CALIBRATION = (
-    "Default to Neutral unless the sentiment is clearly and unambiguously "
-    "one-sided — purely informational or transactional mentions, and "
-    "mentions that mix praise and criticism, should be Neutral rather than "
-    "forced to Positive or Negative. Reserve Positive/Negative for mentions "
-    "where the tone is genuinely, predominantly one-sided."
+    "Most mentions DO express a real, codable sentiment — don't round down to "
+    "Neutral just because the tone is moderate rather than extreme. Reserve "
+    "Neutral for mentions that are genuinely uninformative about sentiment: "
+    "purely factual/transactional content with no evaluative framing, or "
+    "mentions where positive and negative points are roughly balanced "
+    "against each other. If a mention leans clearly one way, even mildly, "
+    "code that direction rather than defaulting to Neutral."
 )
 
 GENERAL_PROMPT = (

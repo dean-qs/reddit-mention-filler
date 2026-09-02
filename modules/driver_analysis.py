@@ -56,8 +56,10 @@ TAG_SYSTEM_PROMPT_TEMPLATE = (
     "themes (e.g. praising one aspect while criticizing another in the same post). For each "
     "theme you tag, also give the sentiment expressed toward THAT SPECIFIC THEME in this "
     "mention (Positive, Negative, or Neutral) — this can differ from theme to theme within the "
-    "same mention. Only tag themes that are genuinely present; return an empty list if none of "
-    "the themes below fit.\n\nThemes:\n{theme_list}"
+    "same mention. Use Neutral for a theme when the mention touches it without a clear "
+    "evaluative slant toward that specific aspect — a purely descriptive or passing reference, "
+    "not just mild positivity/negativity. Only tag themes that are genuinely present; return an "
+    "empty list if none of the themes below fit.\n\nThemes:\n{theme_list}"
 )
 
 SUMMARY_SYSTEM_PROMPT_TEMPLATE = (
