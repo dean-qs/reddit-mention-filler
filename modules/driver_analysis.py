@@ -7,13 +7,23 @@ earlier in this same pass or on a file already processed.
 For each entity (or "Rest of Field" in owned-vs-competitor mode):
   1. Discover themes from a sample of that entity's mentions — agnostic of
      sentiment, since the same theme can show up in both praise and
-     criticism (e.g. one post can be a driver on one theme and a barrier on
-     another: "YouTube Kids is amazing, but I worry about circumventing
-     controls" touches both). Reuses core/theme_discovery.py.
-  2. Tag every mention with EVERY theme that genuinely applies (multi-label)
-     plus that mention's sentiment TOWARD THAT THEME specifically — not
-     reused from the mention's one overall entity sentiment, since a single
-     mixed post can be positive on one theme and negative on another.
+     criticism. Reuses core/theme_discovery.py.
+  2. Tag every mention with EVERY theme that genuinely applies (multi-label,
+     presence only — "does this mention touch on Youth Culture?"). Two ways
+     to get each theme's Positive/Negative/Neutral counts from there
+     (params["theme_sentiment_mode"]):
+       - "inherited" (default): a theme's sentiment for a given mention is
+         that mention's ALREADY-COMPUTED Sentiment Coding value toward the
+         entity — a Negative TikTok mention that touches Youth Culture is a
+         Negative Youth Culture data point, full stop. Guarantees this
+         module's numbers always agree with Sentiment Coding's for the same
+         entity, and the tagging call only needs to ask "which themes"
+         (cheaper, simpler schema — no independent sentiment judgment).
+       - "per_theme": the LLM independently judges sentiment PER THEME
+         instead (a single mixed mention can be Positive on one theme and
+         Negative on another) — more nuanced, but this module's numbers can
+         then legitimately diverge from Sentiment Coding's, since they're
+         answering a different question. Opt-in, with a UI warning.
   3. Classify each theme as Driver / Barrier / Neutral by net sentiment
      ((Positive - Negative) / Total) against a configurable threshold.
   4. Write a narrative summary per entity synthesizing its drivers/barriers.
@@ -50,7 +60,15 @@ DISCOVERY_SYSTEM_PROMPT = (
     "Respond with 'themes': an array of {{name, description}} objects."
 )
 
-TAG_SYSTEM_PROMPT_TEMPLATE = (
+TAG_SYSTEM_PROMPT_TEMPLATE_PRESENCE_ONLY = (
+    "This mention is about {label}. Identify every theme below that genuinely applies to it — "
+    "usually one, but tag more than one when the mention clearly touches multiple distinct "
+    "themes. Only tag themes that are genuinely present; return an empty list if none of the "
+    "themes below fit. This mention's sentiment toward {label} overall is handled elsewhere — "
+    "you're only identifying which themes it touches, not judging tone.\n\nThemes:\n{theme_list}"
+)
+
+TAG_SYSTEM_PROMPT_TEMPLATE_PER_THEME = (
     "This mention is about {label}. Identify every theme below that genuinely applies to it — "
     "usually one, but tag more than one when the mention clearly touches multiple distinct "
     "themes (e.g. praising one aspect while criticizing another in the same post). For each "
@@ -84,7 +102,29 @@ MONTHLY_SHEET_COLS = [
 ]
 
 
-def _tag_schema(theme_names):
+def _tag_schema_presence_only(theme_names):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "driver_tag",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "themes": {
+                        "type": "array",
+                        "maxItems": MAX_TAGS_PER_MENTION,
+                        "items": {"type": "string", "enum": theme_names},
+                    }
+                },
+                "required": ["themes"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _tag_schema_per_theme(theme_names):
     return {
         "type": "json_schema",
         "json_schema": {
@@ -148,18 +188,21 @@ def _month_key(date_val):
 
 def _filter_relevant(all_rows, entity_name):
     col = f"LLM Sentiment: {entity_name}"
-    return [(row_num, row) for row_num, row in all_rows if row.get(col) in REAL_SENTIMENTS]
+    return [(row_num, row, entity_name) for row_num, row in all_rows if row.get(col) in REAL_SENTIMENTS]
 
 
 def _build_rest_of_field_units(all_rows, competitor_names):
     """A row mentioning two competitors contributes one unit per competitor —
     same entity-specific attribution Sentiment Coding already does; a single
-    post can be evidence for more than one competitor's analysis."""
+    post can be evidence for more than one competitor's analysis. Each unit
+    carries its own specific competitor name (not just the "Rest of Field"
+    bucket label) so "inherited" mode can pull the right entity's sentiment
+    column per unit."""
     units = []
     for row_num, row in all_rows:
         for name in competitor_names:
             if row.get(f"LLM Sentiment: {name}") in REAL_SENTIMENTS:
-                units.append((f"{row_num}::{name}", row))
+                units.append((f"{row_num}::{name}", row, name))
     return units
 
 
@@ -178,24 +221,30 @@ def _generate_summary(client, label, theme_rows, usage_totals):
         return f"(Summary generation failed: {e})"
 
 
-def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usage_totals, progress_cb):
-    """units: list of (unit_key, row). Returns (theme_rows, monthly_rows,
-    summary_text, n_tagged, n_failed, n_no_date)."""
+def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, theme_sentiment_mode, usage_totals, progress_cb):
+    """units: list of (unit_key, row, entity_name). Returns (theme_rows,
+    monthly_rows, summary_text, n_tagged, n_failed, n_no_date)."""
     if not units:
         return [], [], f"No mentions found for {label}.", 0, 0, 0
+
+    per_theme = theme_sentiment_mode == "per_theme"
 
     if progress_cb:
         progress_cb(0.0, f"{label}: discovering themes from a sample...")
     sample = random.sample(units, min(sample_size, len(units)))
-    sample_rows = [row for _, row in sample]
+    sample_rows = [row for _, row, _ in sample]
     discovery_system = DISCOVERY_SYSTEM_PROMPT.format(label=label, n_themes=n_themes)
     theme_names, theme_descriptions = discover_themes(client, discovery_system, sample_rows, n_themes, usage_totals)
 
     theme_list_text = "\n".join(f"- {name}: {theme_descriptions[name]}" for name in theme_names)
-    tag_system = TAG_SYSTEM_PROMPT_TEMPLATE.format(label=label, theme_list=theme_list_text)
-    tag_schema = _tag_schema(theme_names)
+    if per_theme:
+        tag_system = TAG_SYSTEM_PROMPT_TEMPLATE_PER_THEME.format(label=label, theme_list=theme_list_text)
+        tag_schema = _tag_schema_per_theme(theme_names)
+    else:
+        tag_system = TAG_SYSTEM_PROMPT_TEMPLATE_PRESENCE_ONLY.format(label=label, theme_list=theme_list_text)
+        tag_schema = _tag_schema_presence_only(theme_names)
 
-    def tag_one(unit_key, row):
+    def tag_one(unit_key, row, entity_name):
         text = str(row.get("Full Text") or "")[:TAG_TEXT_CHARS]
         title = row.get("Title") or ""
         user_message = f"Post Title: {title}\nFull Text: {text}"
@@ -206,9 +255,9 @@ def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usag
     n_failed = 0
     done = 0
 
-    first_key, first_row = units[0]
+    first_key, first_row, first_entity = units[0]
     try:
-        _, first_content, first_usage = tag_one(first_key, first_row)
+        _, first_content, first_usage = tag_one(first_key, first_row, first_entity)
     except Exception as e:
         raise RuntimeError(
             f"The first tagging test call for {label} failed — check your API key/billing "
@@ -222,7 +271,7 @@ def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usag
 
     remaining = units[1:]
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(tag_one, k, r) for k, r in remaining]
+        futures = [pool.submit(tag_one, k, r, e) for k, r, e in remaining]
         for fut in concurrent.futures.as_completed(futures):
             try:
                 k, content, usage = fut.result()
@@ -240,28 +289,46 @@ def _analyze_bucket(client, label, units, n_themes, sample_size, threshold, usag
     # above — no extra LLM calls needed for the monthly breakdown.
     monthly_counts = {}
     no_date_unit_keys = set()
-    for unit_key, row in units:
+
+    def record(name, sentiment, row, month_key):
+        if name not in counts or sentiment not in REAL_SENTIMENTS:
+            return
+        counts[name][sentiment] += 1
+        if sentiment in ("Positive", "Negative") and quotes[name][sentiment] is None:
+            quotes[name][sentiment] = (str(row.get("Full Text") or "")[:250], row.get("Url", ""))
+        if month_key:
+            monthly_key = (name, month_key)
+            if monthly_key not in monthly_counts:
+                monthly_counts[monthly_key] = {"Positive": 0, "Negative": 0, "Neutral": 0}
+            monthly_counts[monthly_key][sentiment] += 1
+
+    for unit_key, row, entity_name in units:
         result = results.get(unit_key)
         if not result:
             continue
-        tags = result.get("themes", [])
-        if not tags:
-            continue
         month_key = _month_key(row.get("Date"))
-        if month_key is None:
-            no_date_unit_keys.add(unit_key)
-        for tag in tags:
-            name, sentiment = tag.get("name"), tag.get("sentiment")
-            if name not in counts or sentiment not in REAL_SENTIMENTS:
+
+        if per_theme:
+            tags = result.get("themes", [])
+            if not tags:
                 continue
-            counts[name][sentiment] += 1
-            if sentiment in ("Positive", "Negative") and quotes[name][sentiment] is None:
-                quotes[name][sentiment] = (str(row.get("Full Text") or "")[:250], row.get("Url", ""))
-            if month_key:
-                monthly_key = (name, month_key)
-                if monthly_key not in monthly_counts:
-                    monthly_counts[monthly_key] = {"Positive": 0, "Negative": 0, "Neutral": 0}
-                monthly_counts[monthly_key][sentiment] += 1
+            if month_key is None:
+                no_date_unit_keys.add(unit_key)
+            for tag in tags:
+                record(tag.get("name"), tag.get("sentiment"), row, month_key)
+        else:
+            # "inherited": sentiment for every theme this row touches is the
+            # SAME value — this row's already-computed entity sentiment.
+            theme_hits = result.get("themes", [])
+            if not theme_hits:
+                continue
+            sentiment = row.get(f"LLM Sentiment: {entity_name}")
+            if sentiment not in REAL_SENTIMENTS:
+                continue
+            if month_key is None:
+                no_date_unit_keys.add(unit_key)
+            for name in theme_hits:
+                record(name, sentiment, row, month_key)
 
     theme_rows = []
     for name in theme_names:
@@ -360,6 +427,25 @@ class DriverAnalysisModule(AnalysisModule):
             help="Themes with net sentiment inside +/- this band are classified Neutral rather "
                  "than Driver/Barrier.",
         ) / 100.0
+
+        theme_mode = st.radio(
+            "How should each theme's sentiment be determined?",
+            ["Inherit from entity sentiment (Recommended)", "Judge sentiment per theme independently"],
+            key=f"{key_prefix}_theme_sentiment_mode",
+            help="Inherit: a theme's Positive/Negative/Neutral counts come straight from that "
+                 "mention's already-computed Sentiment Coding value toward the entity — so this "
+                 "module's numbers always agree with Sentiment Coding's for the same entity. "
+                 "Per-theme: the LLM judges sentiment toward each theme independently (a single "
+                 "mixed mention can be Positive on one theme and Negative on another) — more "
+                 "nuanced, but the two sheets can then legitimately disagree.",
+        )
+        params["theme_sentiment_mode"] = "inherited" if theme_mode.startswith("Inherit") else "per_theme"
+        if params["theme_sentiment_mode"] == "per_theme":
+            st.warning(
+                "⚠️ With per-theme sentiment, a theme's Driver/Barrier counts may not match the "
+                "overall Sentiment Coding numbers for the same entity — expected in this mode (a "
+                "mixed post can genuinely differ per theme), not a bug."
+            )
         return params
 
     def estimate(self, parsed, params, context) -> Estimate:
@@ -368,13 +454,15 @@ class DriverAnalysisModule(AnalysisModule):
             "Requires Sentiment Coding (Multiple entities mode) to have already run — either "
             "earlier in this same pass or on an already-processed file.",
         ]
+        per_theme = params.get("theme_sentiment_mode") == "per_theme"
+        template = TAG_SYSTEM_PROMPT_TEMPLATE_PER_THEME if per_theme else TAG_SYSTEM_PROMPT_TEMPLATE_PRESENCE_ONLY
         assumed_relevant_frac = 0.3
         assumed_n_buckets = 5 if params["mode"] == "by_brand" else 2
         per_bucket_rows = max(1, int(n * assumed_relevant_frac))
         discovery_in = min(params["sample_size"], per_bucket_rows) * 90 + 100
         discovery_out = params["n_themes"] * 30 + 20
-        tag_in_per_row = rough_token_estimate(TAG_SYSTEM_PROMPT_TEMPLATE) + params["n_themes"] * 20 + 250
-        tag_out_per_row = 60
+        tag_in_per_row = rough_token_estimate(template) + params["n_themes"] * 20 + 250
+        tag_out_per_row = 60 if per_theme else 20
         summary_in, summary_out = 300, 150
         per_bucket_cost = (
             (discovery_in + tag_in_per_row * per_bucket_rows + summary_in) / 1_000_000 * PRICE_PER_1M_INPUT
@@ -437,6 +525,7 @@ class DriverAnalysisModule(AnalysisModule):
 
         usage_totals = new_usage_totals()
         client = get_client()
+        theme_sentiment_mode = params.get("theme_sentiment_mode", "inherited")
 
         theme_sheet_rows = []
         monthly_sheet_rows = []
@@ -451,7 +540,7 @@ class DriverAnalysisModule(AnalysisModule):
 
             theme_rows, monthly_rows, summary_text, n_tagged, n_failed, n_no_date = _analyze_bucket(
                 client, label, units, params["n_themes"], params["sample_size"], params["threshold"],
-                usage_totals, bucket_progress_cb,
+                theme_sentiment_mode, usage_totals, bucket_progress_cb,
             )
             theme_sheet_rows.extend(theme_rows)
             monthly_sheet_rows.extend(monthly_rows)
